@@ -1,10 +1,7 @@
 ---
 name: Land-blocking Test
 
-on:
-  push:
-    branches:
-      - auto
+on: push
 
 jobs:
   build-images:
@@ -17,7 +14,7 @@ jobs:
           echo "::set-env name=LIBRA_GIT_REV::$(git rev-parse --short=8 HEAD)"
           echo "::set-env name=TEST_TAG::land_$(git rev-parse --short=8 HEAD)"
       - name: Build, tag and push images
-        if: ! secrets.KILL_SWITCH_LAND_BLOCKING_TEST
+        if: secrets.KILL_SWITCH_LAND_BLOCKING_TEST == 'false'
         run: |
           set +e
           RETRYABLE_EXIT_CODE=2
@@ -56,7 +53,7 @@ jobs:
             echo "::set-output name=should_run::true";
           fi;
       - name: Launch cluster test
-        if: ! secrets.KILL_SWITCH_LAND_BLOCKING_TEST
+        if: secrets.KILL_SWITCH_LAND_BLOCKING_TEST == 'false'
         # NOTE Remember to update PR comment payload if cti cmd is updated.
         run: |
           export CTI_OUTPUT_LOG=$(mktemp)
@@ -199,7 +196,7 @@ jobs:
             echo "::set-output name=should_run::true";
           fi;
       - name: Launch cluster test
-        if: ! secrets.KILL_SWITCH_LAND_BLOCKING_TEST
+        if: secrets.KILL_SWITCH_LAND_BLOCKING_TEST == 'false'
         # NOTE Remember to update PR comment payload if cti cmd is updated.
         run: |
           export CTI_OUTPUT_LOG=$(mktemp)
