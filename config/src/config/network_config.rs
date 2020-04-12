@@ -12,7 +12,7 @@ use libra_crypto::{
     x25519::{X25519StaticPrivateKey, X25519StaticPublicKey},
     Uniform, ValidKey,
 };
-use libra_types::{account_address::AuthenticationKey, PeerId};
+use libra_types::{transaction::authenticator::AuthenticationKey, PeerId};
 use parity_multiaddr::Multiaddr;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
@@ -175,8 +175,8 @@ impl NetworkConfig {
     }
 
     pub fn random_with_peer_id(&mut self, rng: &mut StdRng, peer_id: Option<PeerId>) {
-        let signing_key = Ed25519PrivateKey::generate_for_testing(rng);
-        let identity_key = X25519StaticPrivateKey::generate_for_testing(rng);
+        let signing_key = Ed25519PrivateKey::generate(rng);
+        let identity_key = X25519StaticPrivateKey::generate(rng);
         let network_keypairs = NetworkKeyPairs::load(signing_key, identity_key);
         self.peer_id = if let Some(peer_id) = peer_id {
             peer_id

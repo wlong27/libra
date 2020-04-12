@@ -16,11 +16,11 @@ mod vault;
 
 pub use crate::{
     crypto_kv_storage::CryptoKVStorage,
-    crypto_storage::CryptoStorage,
+    crypto_storage::{CryptoStorage, PublicKeyResponse},
     error::Error,
-    in_memory::InMemoryStorage,
-    kv_storage::KVStorage,
-    on_disk::OnDiskStorage,
+    in_memory::{InMemoryStorage, InMemoryStorageInternal},
+    kv_storage::{GetResponse, KVStorage},
+    on_disk::{OnDiskStorage, OnDiskStorageInternal},
     policy::{Capability, Identity, Permission, Policy},
     storage::Storage,
     value::Value,

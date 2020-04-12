@@ -5,8 +5,9 @@
 
 use anyhow::Result;
 use libra_logger::info;
-use libradb::{LibraDB, LibraDBTrait};
+use libradb::LibraDB;
 use std::path::PathBuf;
+use storage_interface::DbReader;
 use transaction_builder::get_transaction_name;
 
 use libra_types::{account_address::AccountAddress, account_config::AccountResource};
@@ -55,6 +56,7 @@ fn print_head(db: &LibraDB) -> Result<()> {
     info!(
         "Current Validator Set: {}",
         si.latest_validator_set
+            .as_ref()
             .expect("Unable to determine validator set, DB incorrect")
     );
 

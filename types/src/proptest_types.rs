@@ -8,11 +8,9 @@ use crate::{
     account_state_blob::AccountStateBlob,
     block_info::{BlockInfo, Round},
     block_metadata::BlockMetadata,
-    byte_array::ByteArray,
     contract_event::ContractEvent,
-    crypto_proxies::{ValidatorChangeProof, ValidatorSet},
     discovery_info::DiscoveryInfo,
-    event::{EventHandle, EventKey, EVENT_KEY_LENGTH},
+    event::{EventHandle, EventKey},
     get_with_proof::{ResponseItem, UpdateToLatestLedgerResponse},
     language_storage::{StructTag, TypeTag},
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
@@ -22,12 +20,15 @@ use crate::{
         Transaction, TransactionArgument, TransactionListWithProof, TransactionPayload,
         TransactionStatus, TransactionToCommit, Version,
     },
+    validator_change::ValidatorChangeProof,
+    validator_set::ValidatorSet,
     vm_error::{StatusCode, VMStatus},
     write_set::{WriteOp, WriteSet, WriteSetMut},
 };
 use libra_crypto::{
-    ed25519::{compat::keypair_strategy, *},
+    ed25519::{self, Ed25519PrivateKey, Ed25519PublicKey, Ed25519Signature},
     hash::CryptoHash,
+    test_utils::KeyPair,
     traits::*,
     x25519::X25519StaticPublicKey,
     HashValue,
@@ -48,23 +49,6 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
     time::Duration,
 };
-
-prop_compose! {
-    #[inline]
-    pub fn arb_byte_array()(byte_array in vec(any::<u8>(), 1..=10)) -> ByteArray {
-        ByteArray::new(byte_array)
-    }
-}
-
-impl Arbitrary for ByteArray {
-    type Parameters = ();
-    #[inline]
-    fn arbitrary_with(_args: ()) -> Self::Strategy {
-        arb_byte_array().boxed()
-    }
-
-    type Strategy = BoxedStrategy<Self>;
-}
 
 impl WriteOp {
     pub fn value_strategy() -> impl Strategy<Value = Self> {
@@ -210,11 +194,14 @@ impl AccountInfoUniverse {
 impl Arbitrary for AccountInfoUniverse {
     type Parameters = usize;
     fn arbitrary_with(num_accounts: Self::Parameters) -> Self::Strategy {
-        vec(keypair_strategy(), num_accounts)
-            .prop_map(|keypairs| {
+        vec(ed25519::keypair_strategy(), num_accounts)
+            .prop_map(|kps| {
+                let kps: Vec<_> = kps
+                    .into_iter()
+                    .map(|k| (k.private_key, k.public_key))
+                    .collect();
                 AccountInfoUniverse::new(
-                    keypairs, /* epoch = */ 0, /* round = */ 0,
-                    /* next_version = */ 0,
+                    kps, /* epoch = */ 0, /* round = */ 0, /* next_version = */ 0,
                 )
             })
             .boxed()
@@ -232,6 +219,7 @@ pub struct RawTransactionGen {
     payload: TransactionPayload,
     max_gas_amount: u64,
     gas_unit_price: u64,
+    gas_specifier: TypeTag,
     expiration_time_secs: u64,
 }
 
@@ -252,6 +240,7 @@ impl RawTransactionGen {
             self.payload,
             self.max_gas_amount,
             self.gas_unit_price,
+            self.gas_specifier,
             self.expiration_time_secs,
         )
     }
@@ -261,6 +250,7 @@ impl RawTransaction {
     fn strategy_impl(
         address_strategy: impl Strategy<Value = AccountAddress>,
         payload_strategy: impl Strategy<Value = TransactionPayload>,
+        gas_specifier_strategy: impl Strategy<Value = TypeTag>,
     ) -> impl Strategy<Value = Self> {
         // XXX what other constraints do these need to obey?
         (
@@ -269,6 +259,7 @@ impl RawTransaction {
             payload_strategy,
             any::<u64>(),
             any::<u64>(),
+            gas_specifier_strategy,
             any::<u64>(),
         )
             .prop_map(
@@ -278,6 +269,7 @@ impl RawTransaction {
                     payload,
                     max_gas_amount,
                     gas_unit_price,
+                    gas_specifier,
                     expiration_time_secs,
                 )| {
                     new_raw_transaction(
@@ -286,6 +278,7 @@ impl RawTransaction {
                         payload,
                         max_gas_amount,
                         gas_unit_price,
+                        gas_specifier,
                         expiration_time_secs,
                     )
                 },
@@ -299,6 +292,7 @@ fn new_raw_transaction(
     payload: TransactionPayload,
     max_gas_amount: u64,
     gas_unit_price: u64,
+    gas_specifier: TypeTag,
     expiration_time_secs: u64,
 ) -> RawTransaction {
     match payload {
@@ -308,6 +302,7 @@ fn new_raw_transaction(
             TransactionPayload::Program,
             max_gas_amount,
             gas_unit_price,
+            gas_specifier,
             Duration::from_secs(expiration_time_secs),
         ),
         TransactionPayload::Module(module) => RawTransaction::new_module(
@@ -316,6 +311,7 @@ fn new_raw_transaction(
             module,
             max_gas_amount,
             gas_unit_price,
+            gas_specifier,
             Duration::from_secs(expiration_time_secs),
         ),
         TransactionPayload::Script(script) => RawTransaction::new_script(
@@ -324,6 +320,7 @@ fn new_raw_transaction(
             script,
             max_gas_amount,
             gas_unit_price,
+            gas_specifier,
             Duration::from_secs(expiration_time_secs),
         ),
         TransactionPayload::WriteSet(write_set) => {
@@ -337,7 +334,12 @@ fn new_raw_transaction(
 impl Arbitrary for RawTransaction {
     type Parameters = ();
     fn arbitrary_with(_args: ()) -> Self::Strategy {
-        Self::strategy_impl(any::<AccountAddress>(), any::<TransactionPayload>()).boxed()
+        Self::strategy_impl(
+            any::<AccountAddress>(),
+            any::<TransactionPayload>(),
+            any::<TypeTag>(),
+        )
+        .boxed()
     }
 
     type Strategy = BoxedStrategy<Self>;
@@ -347,44 +349,69 @@ impl SignatureCheckedTransaction {
     // This isn't an Arbitrary impl because this doesn't generate *any* possible SignedTransaction,
     // just one kind of them.
     pub fn script_strategy(
-        keypair_strategy: impl Strategy<Value = (Ed25519PrivateKey, Ed25519PublicKey)>,
+        keypair_strategy: impl Strategy<Value = KeyPair<Ed25519PrivateKey, Ed25519PublicKey>>,
+        gas_specifier_strategy: impl Strategy<Value = TypeTag>,
     ) -> impl Strategy<Value = Self> {
-        Self::strategy_impl(keypair_strategy, TransactionPayload::script_strategy())
+        Self::strategy_impl(
+            keypair_strategy,
+            TransactionPayload::script_strategy(),
+            gas_specifier_strategy,
+        )
     }
 
     pub fn module_strategy(
-        keypair_strategy: impl Strategy<Value = (Ed25519PrivateKey, Ed25519PublicKey)>,
+        keypair_strategy: impl Strategy<Value = KeyPair<Ed25519PrivateKey, Ed25519PublicKey>>,
+        gas_specifier_strategy: impl Strategy<Value = TypeTag>,
     ) -> impl Strategy<Value = Self> {
-        Self::strategy_impl(keypair_strategy, TransactionPayload::module_strategy())
+        Self::strategy_impl(
+            keypair_strategy,
+            TransactionPayload::module_strategy(),
+            gas_specifier_strategy,
+        )
     }
 
     pub fn write_set_strategy(
-        keypair_strategy: impl Strategy<Value = (Ed25519PrivateKey, Ed25519PublicKey)>,
+        keypair_strategy: impl Strategy<Value = KeyPair<Ed25519PrivateKey, Ed25519PublicKey>>,
+        gas_specifier_strategy: impl Strategy<Value = TypeTag>,
     ) -> impl Strategy<Value = Self> {
-        Self::strategy_impl(keypair_strategy, TransactionPayload::write_set_strategy())
+        Self::strategy_impl(
+            keypair_strategy,
+            TransactionPayload::write_set_strategy(),
+            gas_specifier_strategy,
+        )
     }
 
     pub fn genesis_strategy(
-        keypair_strategy: impl Strategy<Value = (Ed25519PrivateKey, Ed25519PublicKey)>,
+        keypair_strategy: impl Strategy<Value = KeyPair<Ed25519PrivateKey, Ed25519PublicKey>>,
+        gas_specifier_strategy: impl Strategy<Value = TypeTag>,
     ) -> impl Strategy<Value = Self> {
-        Self::strategy_impl(keypair_strategy, TransactionPayload::genesis_strategy())
+        Self::strategy_impl(
+            keypair_strategy,
+            TransactionPayload::genesis_strategy(),
+            gas_specifier_strategy,
+        )
     }
 
     fn strategy_impl(
-        keypair_strategy: impl Strategy<Value = (Ed25519PrivateKey, Ed25519PublicKey)>,
+        keypair_strategy: impl Strategy<Value = KeyPair<Ed25519PrivateKey, Ed25519PublicKey>>,
         payload_strategy: impl Strategy<Value = TransactionPayload>,
+        gas_specifier_strategy: impl Strategy<Value = TypeTag>,
     ) -> impl Strategy<Value = Self> {
-        (keypair_strategy, payload_strategy)
-            .prop_flat_map(|(keypair, payload)| {
-                let address = AccountAddress::from_public_key(&keypair.1);
+        (keypair_strategy, payload_strategy, gas_specifier_strategy)
+            .prop_flat_map(|(keypair, payload, gas_specifier)| {
+                let address = AccountAddress::from_public_key(&keypair.public_key);
                 (
                     Just(keypair),
-                    RawTransaction::strategy_impl(Just(address), Just(payload)),
+                    RawTransaction::strategy_impl(
+                        Just(address),
+                        Just(payload),
+                        Just(gas_specifier),
+                    ),
                 )
             })
-            .prop_map(|((private_key, public_key), raw_txn)| {
+            .prop_map(|(keypair, raw_txn)| {
                 raw_txn
-                    .sign(&private_key, public_key)
+                    .sign(&keypair.private_key, keypair.public_key)
                     .expect("signing should always work")
             })
     }
@@ -412,7 +439,12 @@ impl SignatureCheckedTransactionGen {
 impl Arbitrary for SignatureCheckedTransaction {
     type Parameters = ();
     fn arbitrary_with(_args: ()) -> Self::Strategy {
-        Self::strategy_impl(keypair_strategy(), any::<TransactionPayload>()).boxed()
+        Self::strategy_impl(
+            ed25519::keypair_strategy(),
+            any::<TransactionPayload>(),
+            any::<TypeTag>(),
+        )
+        .boxed()
     }
 
     type Strategy = BoxedStrategy<Self>;
@@ -521,9 +553,10 @@ impl Arbitrary for Script {
         // The vector sizes are picked out of thin air.
         (
             vec(any::<u8>(), 0..100),
+            vec(any::<TypeTag>(), 0..4),
             vec(any::<TransactionArgument>(), 0..10),
         )
-            .prop_map(|(code, args)| Script::new(code, args))
+            .prop_map(|(code, ty_args, args)| Script::new(code, ty_args, args))
             .boxed()
     }
 }
@@ -557,10 +590,10 @@ impl Arbitrary for TransactionArgument {
 prop_compose! {
     fn arb_validator_signature_for_hash(hash: HashValue)(
         hash in Just(hash),
-        (private_key, public_key) in keypair_strategy(),
+        keypair in ed25519::keypair_strategy(),
     ) -> (AccountAddress, Ed25519Signature) {
-        let signature = private_key.sign_message(&hash);
-        (AccountAddress::from_public_key(&public_key), signature)
+        let signature = keypair.private_key.sign_message(&hash);
+        (AccountAddress::from_public_key(&keypair.public_key), signature)
     }
 }
 
@@ -696,22 +729,6 @@ impl AccountStateBlobGen {
     }
 }
 
-#[cfg(feature = "fuzzing")]
-impl Arbitrary for EventKey {
-    type Parameters = ();
-    type Strategy = BoxedStrategy<Self>;
-
-    fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-        (vec(any::<u8>(), EVENT_KEY_LENGTH))
-            .prop_map(|v| {
-                let mut bytes = [0; EVENT_KEY_LENGTH];
-                bytes.copy_from_slice(v.as_slice());
-                EventKey::new(bytes)
-            })
-            .boxed()
-    }
-}
-
 impl EventHandle {
     pub fn strategy_impl(
         event_key_strategy: impl Strategy<Value = EventKey>,
@@ -742,7 +759,6 @@ impl Arbitrary for TypeTag {
             Just(U8),
             Just(U64),
             Just(U128),
-            Just(ByteArray),
             Just(Address),
             Just(Vector(Box::new(Bool))),
         ];
@@ -974,11 +990,18 @@ impl Arbitrary for BlockMetadata {
         (
             any::<HashValue>(),
             any::<u64>(),
+            any::<u64>(),
             signature_strategy,
             any::<AccountAddress>(),
         )
-            .prop_map(|(id, timestamp, signatures, proposer)| {
-                BlockMetadata::new(id, timestamp, signatures.into_iter().collect(), proposer)
+            .prop_map(|(id, round, timestamp, signatures, proposer)| {
+                BlockMetadata::new(
+                    id,
+                    round,
+                    timestamp,
+                    signatures.into_iter().map(|(addr, _)| addr).collect(),
+                    proposer,
+                )
             })
             .boxed()
     }

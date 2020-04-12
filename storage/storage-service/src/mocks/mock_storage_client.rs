@@ -5,15 +5,15 @@
 
 use anyhow::{Error, Result};
 use futures::stream::BoxStream;
-use libra_crypto::{ed25519::*, HashValue};
+use libra_crypto::{ed25519::Ed25519PrivateKey, HashValue, PrivateKey, Uniform};
 use libra_types::{
-    account_address::{AccountAddress, ADDRESS_LENGTH},
+    access_path::AccessPath,
+    account_address::AccountAddress,
     account_state::AccountState,
     account_state_blob::AccountStateBlob,
-    crypto_proxies::ValidatorChangeProof,
     event::EventHandle,
     get_with_proof::{RequestItem, ResponseItem},
-    ledger_info::LedgerInfoWithSignatures,
+    ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
     proof::{AccumulatorConsistencyProof, SparseMerkleProof, SparseMerkleRangeProof},
     proto::types::{
         request_item::RequestedItems, response_item::ResponseItems, AccountStateWithProof,
@@ -24,13 +24,14 @@ use libra_types::{
     },
     test_helpers::transaction_test_helpers::get_test_signed_txn,
     transaction::{Transaction, Version},
+    validator_change::ValidatorChangeProof,
     vm_error::StatusCode,
 };
 use rand::{
     rngs::{OsRng, StdRng},
     Rng, SeedableRng,
 };
-use std::convert::TryFrom;
+use std::{collections::BTreeMap, convert::TryFrom};
 use storage_client::StorageRead;
 use storage_proto::{
     BackupAccountStateResponse, BackupTransactionInfoResponse, BackupTransactionResponse,
@@ -145,6 +146,10 @@ impl StorageRead for MockStorageReadClient {
     ) -> Result<BoxStream<'_, Result<BackupTransactionInfoResponse, Error>>> {
         unimplemented!()
     }
+
+    async fn batch_fetch_config(&self, _access_paths: Vec<AccessPath>) -> Result<Vec<Vec<u8>>> {
+        unimplemented!()
+    }
 }
 
 fn get_mock_update_to_latest_ledger(
@@ -160,8 +165,10 @@ fn get_mock_update_to_latest_ledger(
     ledger_info.consensus_data_hash = HashValue::zero().to_vec();
     ledger_info.consensus_block_id = HashValue::zero().to_vec();
     ledger_info.version = 7;
-    let mut ledger_info_with_sigs = ProtoLedgerInfoWithSignatures::default();
-    ledger_info_with_sigs.ledger_info = Some(ledger_info);
+    let ledger_info_with_sigs = ProtoLedgerInfoWithSignatures::from(LedgerInfoWithSignatures::new(
+        LedgerInfo::try_from(ledger_info).unwrap(),
+        BTreeMap::new(),
+    ));
     resp.ledger_info_with_sigs = Some(ledger_info_with_sigs);
     resp
 }
@@ -207,7 +214,7 @@ fn get_mock_response_item(request_item: &ProtoRequestItem) -> Result<ProtoRespon
             }
             RequestedItems::GetTransactionsRequest(request) => {
                 let mut ret = TransactionListWithProof::default();
-                let sender = AccountAddress::new([1; ADDRESS_LENGTH]);
+                let sender = AccountAddress::new([1; AccountAddress::LENGTH]);
                 if request.limit > 0 {
                     let txns = get_mock_txn_data(sender, 0, request.limit - 1);
                     ret.transactions = txns;
@@ -251,14 +258,14 @@ fn get_mock_txn_data(
     let mut seed_rng = OsRng::new().expect("can't access OsRng");
     let seed_buf: [u8; 32] = seed_rng.gen();
     let mut rng = StdRng::from_seed(seed_buf);
-    let (priv_key, pub_key) = compat::generate_keypair(&mut rng);
+    let priv_key = Ed25519PrivateKey::generate(&mut rng);
     let mut txns = vec![];
     for i in start_seq..=end_seq {
         let txn = Transaction::UserTransaction(get_test_signed_txn(
             address,
             i,
             &priv_key,
-            pub_key.clone(),
+            priv_key.public_key(),
             None,
         ));
         txns.push(txn.into());

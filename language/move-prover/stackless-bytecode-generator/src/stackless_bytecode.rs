@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use vm::file_format::{
-    AddressPoolIndex, ByteArrayPoolIndex, CodeOffset, FieldDefinitionIndex, FunctionHandleIndex,
-    LocalIndex, LocalsSignatureIndex, StructDefinitionIndex,
+    AddressPoolIndex, ByteArrayPoolIndex, CodeOffset, FunctionHandleIndex, SignatureIndex,
+    StructDefinitionIndex,
 };
 
-type TempIndex = usize;
+pub type TempIndex = usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StacklessBytecode {
-    MoveLoc(TempIndex, LocalIndex),   // t = move(l)
-    CopyLoc(TempIndex, LocalIndex),   // t = copy(l)
-    StLoc(LocalIndex, TempIndex),     // l = t
-    BorrowLoc(TempIndex, LocalIndex), // t1 = &t2
+    MoveLoc(TempIndex, TempIndex),   // t = move(l)
+    CopyLoc(TempIndex, TempIndex),   // t = copy(l)
+    StLoc(TempIndex, TempIndex),     // l = t
+    BorrowLoc(TempIndex, TempIndex), // t1 = &t2
 
     ReadRef(TempIndex, TempIndex),   // t1 = *t2
     WriteRef(TempIndex, TempIndex),  // *t1 = t2
@@ -22,7 +22,7 @@ pub enum StacklessBytecode {
     Call(
         Vec<TempIndex>,
         FunctionHandleIndex,
-        LocalsSignatureIndex,
+        Option<SignatureIndex>,
         Vec<TempIndex>,
     ), /* t1_vec = call(index) with
         * t2_vec as parameters */
@@ -31,35 +31,35 @@ pub enum StacklessBytecode {
     Pack(
         TempIndex,
         StructDefinitionIndex,
-        LocalsSignatureIndex,
+        Option<SignatureIndex>,
         Vec<TempIndex>,
     ), /* t1 = struct(index) with t2_vec
         * as fields */
     Unpack(
         Vec<TempIndex>,
         StructDefinitionIndex,
-        LocalsSignatureIndex,
+        Option<SignatureIndex>,
         TempIndex,
     ), // t1_vec = t2's fields
-    BorrowField(TempIndex, TempIndex, FieldDefinitionIndex), // t1 = t2.field
-    MoveToSender(TempIndex, StructDefinitionIndex, LocalsSignatureIndex), /* move_to_sender<struct_index>(t) */
+    BorrowField(TempIndex, TempIndex, StructDefinitionIndex, TempIndex), // t1 = t2.field
+    MoveToSender(TempIndex, StructDefinitionIndex, Option<SignatureIndex>), /* move_to_sender<struct_index>(t) */
     MoveFrom(
         TempIndex,
         TempIndex,
         StructDefinitionIndex,
-        LocalsSignatureIndex,
+        Option<SignatureIndex>,
     ), /* t1 = move_from<struct_index>(t2) */
     BorrowGlobal(
         TempIndex,
         TempIndex,
         StructDefinitionIndex,
-        LocalsSignatureIndex,
+        Option<SignatureIndex>,
     ), /* t1 = borrow_global<struct_index>(t2) */
     Exists(
         TempIndex,
         TempIndex,
         StructDefinitionIndex,
-        LocalsSignatureIndex,
+        Option<SignatureIndex>,
     ), /* t1 = exists<struct_index>(t2) */
 
     GetGasRemaining(TempIndex),
@@ -111,19 +111,17 @@ pub enum StacklessBytecode {
 
 impl StacklessBytecode {
     pub fn is_unconditional_branch(&self) -> bool {
-        match self {
-            StacklessBytecode::Ret(_)
-            | StacklessBytecode::Abort(_)
-            | StacklessBytecode::Branch(_) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            StacklessBytecode::Ret(_) | StacklessBytecode::Abort(_) | StacklessBytecode::Branch(_)
+        )
     }
 
     pub fn is_conditional_branch(&self) -> bool {
-        match self {
-            StacklessBytecode::BrFalse(_, _) | StacklessBytecode::BrTrue(_, _) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            StacklessBytecode::BrFalse(_, _) | StacklessBytecode::BrTrue(_, _)
+        )
     }
 
     pub fn is_branch(&self) -> bool {

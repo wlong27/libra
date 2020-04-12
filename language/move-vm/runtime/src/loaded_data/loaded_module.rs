@@ -6,15 +6,12 @@ use crate::loaded_data::function::FunctionDef;
 use bytecode_verifier::VerifiedModule;
 use libra_types::vm_error::{StatusCode, VMStatus};
 use move_core_types::identifier::{IdentStr, Identifier};
-use move_vm_types::loaded_data::struct_def::StructDef;
+use move_vm_types::loaded_data::types::StructType;
 use std::{collections::HashMap, sync::RwLock};
 use vm::{
     access::ModuleAccess,
     errors::VMResult,
-    file_format::{
-        CompiledModule, FieldDefinitionIndex, FunctionDefinitionIndex, StructDefinitionIndex,
-        StructFieldInformation, TableIndex,
-    },
+    file_format::{CompiledModule, FunctionDefinitionIndex, StructDefinitionIndex, TableIndex},
     internals::ModuleIndex,
 };
 
@@ -24,15 +21,8 @@ use vm::{
 pub struct LoadedModule {
     module: VerifiedModule,
     pub struct_defs_table: HashMap<Identifier, StructDefinitionIndex>,
-    #[allow(dead_code)]
-    pub field_defs_table: HashMap<Identifier, FieldDefinitionIndex>,
-
     pub function_defs_table: HashMap<Identifier, FunctionDefinitionIndex>,
-
     pub function_defs: Vec<FunctionDef>,
-
-    pub field_offsets: Vec<TableIndex>,
-
     cache: LoadedModuleCache,
 }
 
@@ -46,7 +36,7 @@ impl ModuleAccess for LoadedModule {
 struct LoadedModuleCache {
     // TODO: this can probably be made lock-free by using AtomicPtr or the "atom" crate. Consider
     // doing so in the future.
-    struct_defs: Vec<RwLock<Option<StructDef>>>,
+    struct_defs: Vec<RwLock<Option<StructType>>>,
 }
 
 impl PartialEq for LoadedModuleCache {
@@ -61,7 +51,6 @@ impl Eq for LoadedModuleCache {}
 impl LoadedModule {
     pub fn new(module: VerifiedModule) -> Self {
         let mut struct_defs_table = HashMap::new();
-        let mut field_defs_table = HashMap::new();
         let mut function_defs_table = HashMap::new();
         let mut function_defs = vec![];
 
@@ -72,32 +61,12 @@ impl LoadedModule {
             .collect();
         let cache = LoadedModuleCache { struct_defs };
 
-        let mut field_offsets: Vec<TableIndex> = module.field_defs().iter().map(|_| 0).collect();
-
         for (idx, struct_def) in module.struct_defs().iter().enumerate() {
             let name = module
                 .identifier_at(module.struct_handle_at(struct_def.struct_handle).name)
                 .into();
             let sd_idx = StructDefinitionIndex::new(idx as TableIndex);
             struct_defs_table.insert(name, sd_idx);
-
-            if let StructFieldInformation::Declared {
-                field_count,
-                fields,
-            } = &struct_def.field_information
-            {
-                for i in 0..*field_count {
-                    let field_index = fields.into_index();
-                    // Implication of module verification `member_struct_defs` check
-                    assume!(field_index <= usize::max_value() - (i as usize));
-                    field_offsets[field_index + (i as usize)] = i;
-                }
-            }
-        }
-        for (idx, field_def) in module.field_defs().iter().enumerate() {
-            let name = module.identifier_at(field_def.name).into();
-            let fd_idx = FieldDefinitionIndex::new(idx as TableIndex);
-            field_defs_table.insert(name, fd_idx);
         }
 
         for (idx, function_def) in module.function_defs().iter().enumerate() {
@@ -116,16 +85,14 @@ impl LoadedModule {
         LoadedModule {
             module,
             struct_defs_table,
-            field_defs_table,
             function_defs_table,
             function_defs,
-            field_offsets,
             cache,
         }
     }
 
     /// Return a cached copy of the struct def at this index, if available.
-    pub fn cached_struct_def_at(&self, idx: StructDefinitionIndex) -> Option<StructDef> {
+    pub fn cached_struct_def_at(&self, idx: StructDefinitionIndex) -> Option<StructType> {
         let cached = self.cache.struct_defs[idx.into_index()]
             .read()
             .expect("lock poisoned");
@@ -133,20 +100,13 @@ impl LoadedModule {
     }
 
     /// Cache this struct def at this location.
-    pub fn cache_struct_def(&self, idx: StructDefinitionIndex, def: StructDef) {
+    pub fn cache_struct_def(&self, idx: StructDefinitionIndex, ty: StructType) {
         let mut cached = self.cache.struct_defs[idx.into_index()]
             .write()
             .expect("lock poisoned");
         // XXX If multiple writers call this at the same time, the last write wins. Is this
         // desirable?
-        cached.replace(def);
-    }
-
-    pub fn get_field_offset(&self, idx: FieldDefinitionIndex) -> VMResult<TableIndex> {
-        self.field_offsets
-            .get(idx.into_index())
-            .cloned()
-            .ok_or_else(|| VMStatus::new(StatusCode::LINKER_ERROR))
+        cached.replace(ty);
     }
 
     pub fn get_struct_def_index(&self, struct_name: &IdentStr) -> VMResult<&StructDefinitionIndex> {

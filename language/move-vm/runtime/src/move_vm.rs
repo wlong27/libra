@@ -6,11 +6,15 @@ use crate::{
     runtime::VMRuntime,
 };
 use bytecode_verifier::VerifiedModule;
-use libra_types::language_storage::{ModuleId, StructTag};
+use libra_types::language_storage::ModuleId;
 use move_core_types::identifier::{IdentStr, Identifier};
 use move_vm_cache::Arena;
 use move_vm_definition::MoveVMImpl;
-use move_vm_types::{chain_state::ChainState, loaded_data::struct_def::StructDef, values::Value};
+use move_vm_types::{
+    chain_state::ChainState,
+    loaded_data::types::{StructType, Type},
+    values::Value,
+};
 use vm::{errors::VMResult, gas_schedule::CostTable, transaction_metadata::TransactionMetadata};
 
 rental! {
@@ -41,6 +45,7 @@ impl MoveVM {
         gas_schedule: &CostTable,
         chain_state: &mut S,
         txn_data: &TransactionMetadata,
+        ty_args: Vec<Type>,
         args: Vec<Value>,
     ) -> VMResult<()> {
         self.0.rent(|runtime| {
@@ -50,6 +55,7 @@ impl MoveVM {
                 gas_schedule,
                 module,
                 function_name,
+                ty_args,
                 args,
             )
         })
@@ -62,10 +68,11 @@ impl MoveVM {
         gas_schedule: &CostTable,
         chain_state: &mut S,
         txn_data: &TransactionMetadata,
+        ty_args: Vec<Type>,
         args: Vec<Value>,
     ) -> VMResult<()> {
         self.0.rent(|runtime| {
-            runtime.execute_script(chain_state, txn_data, gas_schedule, script, args)
+            runtime.execute_script(chain_state, txn_data, gas_schedule, script, ty_args, args)
         })
     }
 
@@ -83,27 +90,19 @@ impl MoveVM {
         self.0.rent(|runtime| runtime.cache_module(module))
     }
 
-    pub fn resolve_struct_tag_by_name<S: ChainState>(
-        &self,
-        module_id: &ModuleId,
-        name: &Identifier,
-        chain_state: &mut S,
-    ) -> VMResult<StructTag> {
-        self.0
-            .rent(|runtime| runtime.resolve_struct_tag_by_name(module_id, name, chain_state))
-    }
-
     pub fn resolve_struct_def_by_name<S: ChainState>(
         &self,
         module_id: &ModuleId,
         name: &Identifier,
         chain_state: &mut S,
-    ) -> VMResult<StructDef> {
-        self.0
-            .rent(|runtime| runtime.resolve_struct_def_by_name(module_id, name, chain_state))
+        ty_args: &[Type],
+    ) -> VMResult<StructType> {
+        self.0.rent(|runtime| {
+            runtime.resolve_struct_def_by_name(module_id, name, ty_args, chain_state)
+        })
     }
 
-    /// This is an internal method that is exposed only for tests and cost synthesis.
+    /// This is an internal method that is exposed only for test.
     /// TODO: Figure out a better way to do this.
     pub fn get_loaded_module(
         &self,
@@ -112,11 +111,6 @@ impl MoveVM {
     ) -> VMResult<&LoadedModule> {
         self.0
             .try_ref_rent(|runtime| runtime.get_loaded_module(id, data_view))
-    }
-
-    #[cfg(any(test, feature = "instruction_synthesis"))]
-    pub(crate) fn with_runtime<T>(&self, f: impl FnOnce(&VMRuntime) -> T) -> T {
-        self.0.rent(|runtime| f(runtime))
     }
 }
 

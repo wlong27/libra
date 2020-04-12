@@ -107,17 +107,35 @@ function {:inline} $IsValidU8(v: Value): bool {
   is#Integer(v) && i#Integer(v) >= 0 && i#Integer(v) <= MAX_U8
 }
 
+function {:inline} $IsValidU8Vector(vec: Value): bool {
+  $Vector_is_well_formed(vec)
+  && (forall i: int :: 0 <= i && i < $vlen(vec) ==> $IsValidU8($vmap(vec)[i]))
+}
+
 function {:inline} $IsValidU64(v: Value): bool {
   is#Integer(v) && i#Integer(v) >= 0 && i#Integer(v) <= MAX_U64
 }
+
+function {:inline} $IsValidU64Vector(vec: Value): bool {
+  $Vector_is_well_formed(vec)
+  && (forall i: int :: 0 <= i && i < $vlen(vec) ==> $IsValidU64($vmap(vec)[i]))
+}
+
 
 function {:inline} $IsValidU128(v: Value): bool {
   is#Integer(v) && i#Integer(v) >= 0 && i#Integer(v) <= MAX_U128
 }
 
-function {:inline} $IsValidNum(v: Value): bool {
-  is#Integer(v) && i#Integer(v) >= 0
+function {:inline} $IsValidU128Vector(vec: Value): bool {
+  $Vector_is_well_formed(vec)
+  && (forall i: int :: 0 <= i && i < $vlen(vec) ==> $IsValidU128($vmap(vec)[i]))
 }
+
+function {:inline} $IsValidNum(v: Value): bool {
+  is#Integer(v)
+}
+
+
 
 // Value Array
 // -----------
@@ -133,9 +151,13 @@ axiom v#ValueArray(EmptyValueArray) == MapConstValue(DefaultValue);
 function {:inline} AddValueArray(a: ValueArray, v: Value): ValueArray {
     ValueArray(v#ValueArray(a)[l#ValueArray(a) := v], l#ValueArray(a) + 1)
 }
-
 function {:inline} RemoveValueArray(a: ValueArray): ValueArray {
     ValueArray(v#ValueArray(a)[l#ValueArray(a) - 1 := DefaultValue], l#ValueArray(a) - 1)
+}
+function {:inline} RemoveIndexValueArray(a: ValueArray, i: int): ValueArray {
+    ValueArray(
+        (lambda j: int :: if j < i then v#ValueArray(a)[j] else v#ValueArray(a)[j+1]),
+        l#ValueArray(a) - 1)
 }
 function {:inline} ConcatValueArray(a1: ValueArray, a2: ValueArray): ValueArray {
     ValueArray(
@@ -149,7 +171,7 @@ function {:inline} ReverseValueArray(a: ValueArray): ValueArray {
     )
 }
 function {:inline} SliceValueArray(a: ValueArray, i: int, j: int): ValueArray { // return the sliced vector of a for the range [i, j)
-    ValueArray((lambda k:int :: if k < j-i then v#ValueArray(a)[i+k] else DefaultValue), j-i)
+    ValueArray((lambda k:int :: if 0 <= k && k < j-i then v#ValueArray(a)[i+k] else DefaultValue), (if j-i < 0 then 0 else j-i))
 }
 function {:inline} ExtendValueArray(a: ValueArray, elem: Value): ValueArray {
     ValueArray(v#ValueArray(a)[l#ValueArray(a) := elem], l#ValueArray(a) + 1)
@@ -273,27 +295,43 @@ function {:inline} $vmap(v: Value): [int]Value {
 function {:inline} $vlen(v: Value): int {
     l#ValueArray(v#Vector(v))
 }
+
+// All invalid elements of array are DefaultValue. This is useful in specialized
+// cases
+function {:inline} IsNormalizedMap(va: [int]Value, len: int): bool {
+    (forall i: int :: i < 0 || i >= len ==> va[i] == DefaultValue)
+}
+
+// Check that all invalid elements of vector are DefaultValue
+function {:inline} $is_normalized_vector(v: Value): bool {
+    IsNormalizedMap($vmap(v), $vlen(v))
+}
+
 // Sometimes, we need the length as a Value, not an int.
 function {:inline} $vlen_value(v: Value): Value {
     Integer($vlen(v))
 }
-function {:inline} mk_vector(): Value {
+function {:inline} $mk_vector(): Value {
     Vector(EmptyValueArray)
 }
-function {:inline} push_back_vector(v: Value, elem: Value): Value {
+function {:inline} $push_back_vector(v: Value, elem: Value): Value {
     Vector(AddValueArray(v#Vector(v), elem))
 }
-function {:inline} pop_back_vector(v: Value): Value {
+function {:inline} $pop_back_vector(v: Value): Value {
     Vector(RemoveValueArray(v#Vector(v)))
 }
-function {:inline} append_vector(v1: Value, v2: Value): Value {
+function {:inline} $append_vector(v1: Value, v2: Value): Value {
     Vector(ConcatValueArray(v#Vector(v1), v#Vector(v2)))
 }
-function {:inline} reverse_vector(v: Value): Value {
+function {:inline} $reverse_vector(v: Value): Value {
     Vector(ReverseValueArray(v#Vector(v)))
 }
 function {:inline} $update_vector(v: Value, i: int, elem: Value): Value {
     Vector(UpdateValueArray(v#Vector(v), i, elem))
+}
+// $update_vector_by_value requires index to be a Value, not int.
+function {:inline} $update_vector_by_value(v: Value, i: Value, elem: Value): Value {
+    Vector(UpdateValueArray(v#Vector(v), i#Integer(i), elem))
 }
 function {:inline} $select_vector(v: Value, i: int) : Value {
     $vmap(v)[i]
@@ -302,16 +340,22 @@ function {:inline} $select_vector(v: Value, i: int) : Value {
 function {:inline} $select_vector_by_value(v: Value, i: Value) : Value {
     $vmap(v)[i#Integer(i)]
 }
-function {:inline} swap_vector(v: Value, i: int, j: int): Value {
+function {:inline} $swap_vector(v: Value, i: int, j: int): Value {
     Vector(SwapValueArray(v#Vector(v), i, j))
 }
-function {:inline} $slice_vector(v: Value, i: int, j: int) : Value {
-    Vector(SliceValueArray(v#Vector(v), i, j))
+function {:inline} $slice_vector(v: Value, r: Value) : Value {
+    Vector(SliceValueArray(v#Vector(v), i#Integer(lb#$Range(r)), i#Integer(ub#$Range(r))))
 }
-
 function {:inline} $InVectorRange(v: Value, i: int): bool {
     i >= 0 && i < $vlen(v)
 }
+function {:inline} $remove_vector(v: Value, i:int): Value {
+    Vector(RemoveIndexValueArray(v#Vector(v), i))
+}
+function {:inline} $contains_vector(v: Value, e: Value): bool {
+    (exists i:int :: 0<=i && i<$vlen(v) && IsEqual($vmap(v)[i], e))
+}
+
 function {:inline} $InRange(r: Value, i: int): bool {
    i#Integer(lb#$Range(r)) <= i && i < i#Integer(ub#$Range(r))
 }
@@ -323,34 +367,11 @@ function {:inline} $InRange(r: Value, i: int): bool {
 type {:datatype} Location;
 function {:constructor} Global(t: TypeValue, a: int): Location;
 function {:constructor} Local(i: int): Location;
+function {:constructor} Param(i: int): Location;
 
 type {:datatype} Reference;
 function {:constructor} Reference(l: Location, p: Path): Reference;
 const DefaultReference: Reference;
-
-function {:inline} $IsValidReferenceParameter(m: Memory, local_counter: int, r: Reference): bool {
-  // If the reference parameter is for a local, its index must be less than the current
-  // local counter. This prevents any aliasing with locals which we create later.
-  (is#Local(l#Reference(r)) ==> i#Local(l#Reference(r)) < local_counter)
-  &&
-  // The path must be in range of current stratification depth.
-  (size#Path(p#Reference(r)) >= 0 && size#Path(p#Reference(r)) < StratificationDepth)
-  &&
-  // Each internal node in the memory tree must be a vector and each index in the path must be in range.
-  (size#Path(p#Reference(r)) == 0 ||
-   (is#Vector(contents#Memory(m)[l#Reference(r)]) && p#Path(p#Reference(r))[0] >= 0 &&
-     p#Path(p#Reference(r))[0] < $vlen(contents#Memory(m)[l#Reference(r)])))
-  &&
-  (size#Path(p#Reference(r)) <= 1 ||
-    (is#Vector($ReadValue(Path(p#Path(p#Reference(r)), 1), contents#Memory(m)[l#Reference(r)]))
-     && p#Path(p#Reference(r))[1] >= 0 &&
-     p#Path(p#Reference(r))[1] < $vlen($ReadValue(Path(p#Path(p#Reference(r)), 1), contents#Memory(m)[l#Reference(r)]))))
-  &&
-  (size#Path(p#Reference(r)) <= 2 ||
-    (is#Vector($ReadValue(Path(p#Path(p#Reference(r)), 2), contents#Memory(m)[l#Reference(r)]))
-     && p#Path(p#Reference(r))[1] >= 0 &&
-     p#Path(p#Reference(r))[1] < $vlen($ReadValue(Path(p#Path(p#Reference(r)), 2), contents#Memory(m)[l#Reference(r)]))))
-}
 
 type {:datatype} Memory;
 function {:constructor} Memory(domain: [Location]bool, contents: [Location]Value): Memory;
@@ -419,6 +440,10 @@ function {:inline} $ExistsTxnSenderAccount(m: Memory, txn: Transaction): bool {
    domain#Memory(m)[Global(LibraAccount_T_type_value(), sender#Transaction(txn))]
 }
 
+function {:inline} $TxnSender(txn: Transaction): Value {
+    Address(sender#Transaction(txn))
+}
+
 // Forward declaration of type value of LibraAccount. This is declared so we can define
 // ExistsTxnSenderAccount.
 function LibraAccount_T_type_value(): TypeValue;
@@ -470,7 +495,6 @@ procedure {:inline 1} MoveFrom(address: Value, ta: TypeValue) returns (dst: Valu
 procedure {:inline 1} BorrowGlobal(address: Value, ta: TypeValue) returns (dst: Reference)
 {
     var a: int;
-    var v: Value;
     var l: Location;
     assume is#Address(address);
     a := a#Address(address);
@@ -494,7 +518,7 @@ procedure {:inline 1} BorrowField(src: Reference, f: FieldName) returns (dst: Re
 
     p := p#Reference(src);
     size := size#Path(p);
-	p := Path(p#Path(p)[size := f], size+1);
+    p := Path(p#Path(p)[size := f], size+1);
     dst := Reference(l#Reference(src), p);
 }
 
@@ -735,11 +759,6 @@ function {:constructor} Transaction(
 
 const some_key: ByteArray;
 
-// DD: This doesn't seem to be used.  Commenting it out for now in case I'm wrong.
-// procedure {:inline 1} InitTransaction(sender: Value) {
-//   $txn := Transaction(1, 1000, some_key, sender, 0, 1000);
-// }
-
 procedure {:inline 1} GetGasRemaining() returns (ret_gas_remaining: Value)
 {
   ret_gas_remaining := Integer(gas_remaining#Transaction($txn));
@@ -757,7 +776,7 @@ procedure {:inline 1} GetTxnPublicKey() returns (ret_public_key: Value)
 
 procedure {:inline 1} GetTxnSenderAddress() returns (ret_sender: Value)
 {
-  ret_sender := Address(sender#Transaction($txn));
+  ret_sender := $TxnSender($txn);
 }
 
 procedure {:inline 1} GetTxnMaxGasUnits() returns (ret_max_gas_units: Value)
@@ -778,18 +797,22 @@ function {:inline} $Vector_type_value(tv: TypeValue): TypeValue {
 }
 
 function {:inline} $Vector_is_well_formed(v: Value): bool {
-    is#Vector(v)
+    is#Vector(v) && $vlen(v) >= 0 &&
+    (
+        var va := v#Vector(v);
+        0 <= l#ValueArray(va) &&
+        (forall x: int :: (0 <= x && x < l#ValueArray(va)) || v#ValueArray(va)[x] == DefaultValue)
+    )
 }
 
 procedure {:inline 1} $Vector_empty(ta: TypeValue) returns (v: Value) {
-    v := mk_vector();
+    v := $mk_vector();
 }
 
 procedure {:inline 1} $Vector_is_empty(ta: TypeValue, r: Reference) returns (b: Value) {
     var v: Value;
     v := $Dereference($m, r);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, r);
     b := Boolean($vlen(v) == 0);
 }
 
@@ -797,8 +820,7 @@ procedure {:inline 1} $Vector_push_back(ta: TypeValue, r: Reference, val: Value)
     var v: Value;
     v := $Dereference($m, r);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, r);
-    call WriteRef(r, push_back_vector(v, val));
+    call WriteRef(r, $push_back_vector(v, val));
 }
 
 procedure {:inline 1} $Vector_pop_back(ta: TypeValue, r: Reference) returns (e: Value) {
@@ -806,38 +828,34 @@ procedure {:inline 1} $Vector_pop_back(ta: TypeValue, r: Reference) returns (e: 
     var len: int;
     v := $Dereference($m, r);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, r);
     len := $vlen(v);
     if (len == 0) {
         $abort_flag := true;
         return;
     }
     e := $vmap(v)[len-1];
-    call WriteRef(r, pop_back_vector(v));
+    call WriteRef(r, $pop_back_vector(v));
 }
 
 procedure {:inline 1} $Vector_append(ta: TypeValue, r: Reference, other: Value) {
     var v: Value;
     v := $Dereference($m, r);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, r);
     assume is#Vector(other);
-    call WriteRef(r, append_vector(v, other));
+    call WriteRef(r, $append_vector(v, other));
 }
 
 procedure {:inline 1} $Vector_reverse(ta: TypeValue, r: Reference) {
     var v: Value;
     v := $Dereference($m, r);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, r);
-    call WriteRef(r, reverse_vector(v));
+    call WriteRef(r, $reverse_vector(v));
 }
 
 procedure {:inline 1} $Vector_length(ta: TypeValue, r: Reference) returns (l: Value) {
     var v: Value;
     v := $Dereference($m, r);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, r);
     l := Integer($vlen(v));
 }
 
@@ -855,7 +873,6 @@ procedure {:inline 1} $Vector_borrow_mut(ta: TypeValue, src: Reference, index: V
     i_ind := i#Integer(index);
     v := $Dereference($m, src);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, src);
     if (i_ind < 0 || i_ind >= $vlen(v)) {
         $abort_flag := true;
         return;
@@ -863,7 +880,7 @@ procedure {:inline 1} $Vector_borrow_mut(ta: TypeValue, src: Reference, index: V
 
     p := p#Reference(src);
     size := size#Path(p);
-	p := Path(p#Path(p)[size := i_ind], size+1);
+        p := Path(p#Path(p)[size := i_ind], size+1);
     dst := Reference(l#Reference(src), p);
 }
 
@@ -883,12 +900,11 @@ procedure {:inline 1} $Vector_swap(ta: TypeValue, src: Reference, i: Value, j: V
     j_ind := i#Integer(j);
     v := $Dereference($m, src);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, src);
     if (i_ind >= $vlen(v) || j_ind >= $vlen(v) || i_ind < 0 || j_ind < 0) {
         $abort_flag := true;
         return;
     }
-    v := swap_vector(v, i_ind, j_ind);
+    v := $swap_vector(v, i_ind, j_ind);
     call WriteRef(src, v);
 }
 
@@ -900,7 +916,6 @@ procedure {:inline 1} $Vector_get(ta: TypeValue, src: Reference, i: Value) retur
     i_ind := i#Integer(i);
     v := $Dereference($m, src);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, src);
     if (i_ind < 0 || i_ind >= $vlen(v)) {
         $abort_flag := true;
         return;
@@ -916,7 +931,6 @@ procedure {:inline 1} $Vector_set(ta: TypeValue, src: Reference, i: Value, e: Va
     i_ind := i#Integer(i);
     v := $Dereference($m, src);
     assume is#Vector(v);
-    assume $IsValidReferenceParameter($m, $local_counter, src);
     if (i_ind < 0 || i_ind >= $vlen(v)) {
         $abort_flag := true;
         return;
@@ -925,62 +939,160 @@ procedure {:inline 1} $Vector_set(ta: TypeValue, src: Reference, i: Value, e: Va
     call WriteRef(src, v);
 }
 
-// TODO: implement the below vector methods
+procedure {:inline 1} $Vector_remove(ta: TypeValue, r: Reference, i: Value) returns (e: Value) {
+    var i_ind: int;
+    var v: Value;
+    var len: int;
+
+    assume is#Integer(i);
+    i_ind := i#Integer(i);
+
+    v := $Dereference($m, r);
+    assume is#Vector(v);
+    len := $vlen(v);
+    if (i_ind < 0 || i_ind >= len) {
+        $abort_flag := true;
+        return;
+    }
+    e := $vmap(v)[len-1];
+    call WriteRef(r, $remove_vector(v, i_ind));
+}
+
+procedure {:inline 1} $Vector_swap_remove(ta: TypeValue, r: Reference, i: Value) returns (e: Value) {
+    var i_ind: int;
+    var v: Value;
+    var len: int;
+
+    assume is#Integer(i);
+    i_ind := i#Integer(i);
+
+    v := $Dereference($m, r);
+    assume is#Vector(v);
+    len := $vlen(v);
+    if (i_ind < 0 || i_ind >= len) {
+        $abort_flag := true;
+        return;
+    }
+    e := $vmap(v)[len-1];
+    call WriteRef(r, $pop_back_vector($swap_vector(v, i_ind, len-1)));
+}
 
 procedure {:inline 1} $Vector_contains(ta: TypeValue, vr: Reference, er: Reference) returns (res: Value)  {
-    res := DefaultValue;
-    $abort_flag := true;
+    var v: Value;
+    var e: Value;
+
+    v := $Dereference($m, vr);
+    e := $Dereference($m, er);
+    assume is#Vector(v);
+
+    res := Boolean($contains_vector(v, e));
 }
 
-procedure {:inline 1} $Vector_swap_remove(ta: TypeValue, vr: Reference, idx: Value) returns (res: Value)  {
-    res := DefaultValue;
-    $abort_flag := true;
-}
 
-// ==================================================================================
-// Native address_util
-
-// TODO: implement the below methods
-
-procedure {:inline 1} $AddressUtil_address_to_bytes(addr: Value) returns (res: Value)  {
-    res := DefaultValue;
-    $abort_flag := true;
-}
-
-// ==================================================================================
-// Native u64_util
-
-// TODO: implement the below methods
-
-procedure {:inline 1} $U64Util_u64_to_bytes(val: Value) returns (res: Value)  {
-    res := DefaultValue;
-    $abort_flag := true;
-}
 
 // ==================================================================================
 // Native hash
 
-// TODO: implement the below methods
+// Hash is modeled as an otherwise uninterpreted injection.
+// In truth, it is not an injection since the domain has greater cardinality
+// (arbitrary length vectors) than the co-domain (vectors of length 32).  But it is
+// common to assume in code there are no hash collisions in practice.  Fortunately,
+// Boogie is not smart enough to recognized that there is an inconsistency.
+// FIXME: If we were using a reliable extensional theory of arrays, and if we could use ==
+// instead of IsEqual, we might be able to avoid so many quantified formulas by
+// using a sha2_inverse function in the ensures conditions of Hash_sha2_256 to
+// assert that sha2/3 are injections without using global quantified axioms.
 
-procedure {:inline 1} $Hash_sha2_256(val: Value) returns (res: Value)  {
-    res := DefaultValue;
-    $abort_flag := true;
-}
+function $sha2(val: Value) : Value;
 
-procedure {:inline 1} $Hash_sha3_256(val: Value) returns (res: Value)  {
-    res := DefaultValue;
-    $abort_flag := true;
-}
+// This says that sha2 respects isEquals (this would be automatic if we had an
+// extensional theory of arrays and used ==, which has the substitution property
+// for functions).
+axiom (forall v1,v2: Value :: $Vector_is_well_formed(v1) && $Vector_is_well_formed(v2)
+       && IsEqual(v1, v2) ==> IsEqual($sha2(v1), $sha2(v2)));
+
+// This says that sha2 is an injection
+axiom (forall v1,v2: Value :: $Vector_is_well_formed(v1) && $Vector_is_well_formed(v2)
+        && IsEqual($sha2(v1), $sha2(v2)) ==> IsEqual(v1, v2));
+
+// This procedure has no body. We want Boogie to just to use its requires
+// and ensures properties when verifying code that calls it.
+procedure $Hash_sha2_256(val: Value) returns (res: Value);
+// It will still work without this, but this helps verifier find more reasonable counterexamples.
+// requires $IsValidU8Vector(val);  // FIXME: Generated callling code does not ensure validity.
+ensures res == $sha2(val);     // returns sha2 value
+ensures $IsValidU8Vector(res);    // result is a legal vector of U8s.
+ensures $vlen(res) == 32;               // result is 32 bytes.
+
+// similarly for sha3
+function $sha3(val: Value) : Value;
+
+axiom (forall v1,v2: Value :: $Vector_is_well_formed(v1) && $Vector_is_well_formed(v2)
+       && IsEqual(v1, v2) ==> IsEqual($sha3(v1), $sha3(v2)));
+
+axiom (forall v1,v2: Value :: $Vector_is_well_formed(v1) && $Vector_is_well_formed(v2)
+        && IsEqual($sha3(v1), $sha3(v2)) ==> IsEqual(v1, v2));
+
+procedure $Hash_sha3_256(val: Value) returns (res: Value);
+ensures res == $sha3(val);     // returns sha3 value
+ensures $IsValidU8Vector(res);    // result is a legal vector of U8s.
+ensures $vlen(res) == 32;               // result is 32 bytes.
 
 // ==================================================================================
 // Native libra_account
 
 // TODO: implement the below methods
 
-procedure {:inline 1} $LibraAccount_save_account(balance: Value, account: Value, addr: Value) {
-    $abort_flag := true;
+procedure {:inline 1} $LibraAccount_save_account(ta: TypeValue, balance: Value, account: Value, addr: Value) {
+    assert false; // $LibraAccount_save_account not implemented
 }
 
 procedure {:inline 1} $LibraAccount_write_to_event_store(ta: TypeValue, guid: Value, count: Value, msg: Value) {
-    $abort_flag := true;
+    assert false; // $LibraAccount_write_to_event_store not implemented
 }
+
+// ==================================================================================
+// Native lcs
+
+// TODO: implement the below methods
+
+procedure {:inline 1} $Signature_ed25519_verify(signature: Value, public_key: Value, message: Value) returns (res: Value) {
+    assert false; // $Signature_ed25519_verify not implemented
+}
+
+procedure {:inline 1} Signature_ed25519_threshold_verify(bitmap: Value, signature: Value, public_key: Value, message: Value) returns (res: Value) {
+    assert false; // Signature_ed25519_threshold_verify not implemented
+}
+
+// ==================================================================================
+// Native signature
+
+// TODO: implement the below methods
+
+// ==================================================================================
+// Native LCS::serialize
+
+// native public fun serialize<MoveValue>(v: &MoveValue): vector<u8>;
+
+// Serialize is modeled as an uninterpreted function, with an additional
+// axiom to say it's an injection.
+
+function $serialize(ta: TypeValue, v: Value): Value;
+
+// This says that $serialize respects isEquals (substitution property)
+// Without this, Boogie will get false positives where v1, v2 differ at invalid
+// indices.
+axiom (forall ta: TypeValue ::
+       (forall v1,v2: Value :: IsEqual(v1, v2) ==> IsEqual($serialize(ta, v1), $serialize(ta, v2))));
+
+
+// This says that serialize is an injection
+axiom (forall ta1, ta2: TypeValue ::
+       (forall v1, v2: Value :: IsEqual($serialize(ta1, v1), $serialize(ta2, v2))
+           ==> IsEqual(v1, v2) && (ta1 == ta2)));
+
+
+procedure $LCS_to_bytes(ta: TypeValue, r: Reference) returns (res: Value);
+ensures res == $serialize(ta, $Dereference($m, r));
+ensures $IsValidU8Vector(res);    // result is a legal vector of U8s.
+ensures $vlen(res) > 0;

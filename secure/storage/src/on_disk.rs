@@ -1,9 +1,8 @@
 // Copyright (c) The Libra Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    error::Error, kv_storage::KVStorage, policy::Policy, value::Value, CryptoKVStorage, Storage,
-};
+use crate::{CryptoKVStorage, Error, GetResponse, KVStorage, Policy, Storage, Value};
+use libra_secure_time::{RealTimeService, TimeService};
 use libra_temppath::TempPath;
 use std::{
     collections::HashMap,
@@ -19,13 +18,27 @@ use std::{
 /// must make copies of all key material which violates the Libra code base. It violates it because
 /// the anticipation is that data stores would securely handle key material. This should not be used
 /// in production.
-pub struct OnDiskStorage {
+pub type OnDiskStorage = OnDiskStorageInternal<RealTimeService>;
+
+pub struct OnDiskStorageInternal<T> {
     file_path: PathBuf,
     temp_path: TempPath,
+    time_service: T,
 }
 
-impl OnDiskStorage {
+impl OnDiskStorageInternal<RealTimeService> {
     pub fn new(file_path: PathBuf) -> Self {
+        Self::new_with_time_service(file_path, RealTimeService::new())
+    }
+
+    /// Public convenience function to return a new OnDiskStorage based Storage.
+    pub fn new_storage(path_buf: PathBuf) -> Box<dyn Storage> {
+        Box::new(Self::new(path_buf))
+    }
+}
+
+impl<T: TimeService> OnDiskStorageInternal<T> {
+    fn new_with_time_service(file_path: PathBuf, time_service: T) -> Self {
         if !file_path.exists() {
             File::create(&file_path).expect("Unable to create storage");
         }
@@ -39,10 +52,11 @@ impl OnDiskStorage {
         Self {
             file_path,
             temp_path: TempPath::new_with_temp_dir(file_dir),
+            time_service,
         }
     }
 
-    fn read(&self) -> Result<HashMap<String, Value>, Error> {
+    fn read(&self) -> Result<HashMap<String, GetResponse>, Error> {
         let mut file = File::open(&self.file_path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
@@ -50,21 +64,16 @@ impl OnDiskStorage {
         Ok(data)
     }
 
-    fn write(&self, data: &HashMap<String, Value>) -> Result<(), Error> {
+    fn write(&self, data: &HashMap<String, GetResponse>) -> Result<(), Error> {
         let contents = toml::to_vec(data)?;
         let mut file = File::create(self.temp_path.path())?;
         file.write_all(&contents)?;
         fs::rename(&self.temp_path, &self.file_path)?;
         Ok(())
     }
-
-    /// Public convenience function to return a new OnDiskStorage based Storage.
-    pub fn new_boxed_on_disk_storage(path_buf: PathBuf) -> Box<dyn Storage> {
-        Box::new(OnDiskStorage::new(path_buf))
-    }
 }
 
-impl KVStorage for OnDiskStorage {
+impl<T: Send + Sync + TimeService> KVStorage for OnDiskStorageInternal<T> {
     fn available(&self) -> bool {
         true
     }
@@ -74,11 +83,14 @@ impl KVStorage for OnDiskStorage {
         if data.contains_key(key) {
             return Err(Error::KeyAlreadyExists(key.to_string()));
         }
-        data.insert(key.to_string(), value);
+        data.insert(
+            key.to_string(),
+            GetResponse::new(value, self.time_service.now()),
+        );
         self.write(&data)
     }
 
-    fn get(&self, key: &str) -> Result<Value, Error> {
+    fn get(&self, key: &str) -> Result<GetResponse, Error> {
         let mut data = self.read()?;
         data.remove(key)
             .ok_or_else(|| Error::KeyNotSet(key.to_string()))
@@ -89,14 +101,16 @@ impl KVStorage for OnDiskStorage {
         if !data.contains_key(key) {
             return Err(Error::KeyNotSet(key.to_string()));
         }
-        data.insert(key.to_string(), value);
+        data.insert(
+            key.to_string(),
+            GetResponse::new(value, self.time_service.now()),
+        );
         self.write(&data)
     }
 
-    #[cfg(test)]
     fn reset_and_clear(&mut self) -> Result<(), Error> {
         self.write(&HashMap::new())
     }
 }
 
-impl CryptoKVStorage for OnDiskStorage {}
+impl<T: TimeService + Send + Sync> CryptoKVStorage for OnDiskStorageInternal<T> {}

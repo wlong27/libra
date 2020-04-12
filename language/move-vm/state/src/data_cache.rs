@@ -7,11 +7,12 @@ use libra_state_view::StateView;
 use libra_types::{
     access_path::AccessPath,
     language_storage::ModuleId,
+    on_chain_config::ConfigStorage,
     vm_error::{StatusCode, VMStatus},
     write_set::{WriteOp, WriteSet, WriteSetMut},
 };
 use move_vm_types::{
-    loaded_data::{struct_def::StructDef, types::Type},
+    loaded_data::types::{StructType, Type},
     values::{GlobalValue, Value},
 };
 use std::{collections::btree_map::BTreeMap, mem::replace};
@@ -74,6 +75,12 @@ pub trait RemoteCache {
     fn get(&self, access_path: &AccessPath) -> VMResult<Option<Vec<u8>>>;
 }
 
+impl ConfigStorage for &dyn RemoteCache {
+    fn fetch_config(&self, access_path: AccessPath) -> Option<Vec<u8>> {
+        self.get(&access_path).ok()?
+    }
+}
+
 impl<'block> RemoteCache for BlockDataCache<'block> {
     fn get(&self, access_path: &AccessPath) -> VMResult<Option<Vec<u8>>> {
         BlockDataCache::get(self, access_path)
@@ -106,7 +113,7 @@ pub struct TransactionDataCache<'txn> {
     // TODO: an AccessPath corresponds to a top level resource but that may not be the
     // case moving forward, so we need to review this.
     // Also need to relate this to a ResourceKey.
-    data_map: BTreeMap<AccessPath, Option<(StructDef, GlobalValue)>>,
+    data_map: BTreeMap<AccessPath, Option<(StructType, GlobalValue)>>,
     module_map: BTreeMap<ModuleId, Vec<u8>>,
     data_cache: &'txn dyn RemoteCache,
 }
@@ -123,10 +130,7 @@ impl<'txn> TransactionDataCache<'txn> {
     pub fn exists_module(&self, m: &ModuleId) -> bool {
         self.module_map.contains_key(m) || {
             let ap = AccessPath::from(m);
-            match self.data_cache.get(&ap) {
-                Ok(Some(_)) => true,
-                _ => false,
-            }
+            matches!(self.data_cache.get(&ap), Ok(Some(_)))
         }
     }
 
@@ -150,7 +154,7 @@ impl<'txn> TransactionDataCache<'txn> {
     pub fn publish_resource(
         &mut self,
         ap: &AccessPath,
-        g: (StructDef, GlobalValue),
+        g: (StructType, GlobalValue),
     ) -> VMResult<()> {
         self.data_map.insert(ap.clone(), Some(g));
         Ok(())
@@ -165,14 +169,15 @@ impl<'txn> TransactionDataCache<'txn> {
     pub(crate) fn load_data(
         &mut self,
         ap: &AccessPath,
-        def: StructDef,
-    ) -> VMResult<&mut Option<(StructDef, GlobalValue)>> {
+        ty: StructType,
+    ) -> VMResult<&mut Option<(StructType, GlobalValue)>> {
         if !self.data_map.contains_key(ap) {
             match self.data_cache.get(ap)? {
                 Some(bytes) => {
-                    let res = Value::simple_deserialize(&bytes, Type::Struct(def.clone()))?;
+                    let res =
+                        Value::simple_deserialize(&bytes, Type::Struct(Box::new(ty.clone())))?;
                     let gr = GlobalValue::new(res)?;
-                    self.data_map.insert(ap.clone(), Some((def, gr)));
+                    self.data_map.insert(ap.clone(), Some((ty, gr)));
                 }
                 None => {
                     return Err(vm_error(Location::new(), StatusCode::MISSING_DATA));

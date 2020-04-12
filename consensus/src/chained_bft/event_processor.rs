@@ -43,9 +43,8 @@ use libra_crypto::hash::TransactionAccumulatorHasher;
 use libra_logger::prelude::*;
 use libra_security_logger::{security_log, SecurityEvent};
 use libra_types::{
-    crypto_proxies::{EpochInfo, ValidatorChangeProof, ValidatorVerifier},
-    ledger_info::LedgerInfoWithSignatures,
-    transaction::TransactionStatus,
+    epoch_info::EpochInfo, ledger_info::LedgerInfoWithSignatures, transaction::TransactionStatus,
+    validator_change::ValidatorChangeProof, validator_verifier::ValidatorVerifier,
 };
 #[cfg(test)]
 use safety_rules::ConsensusState;
@@ -110,7 +109,7 @@ pub enum VerifiedEvent<T> {
 #[path = "event_processor_test.rs"]
 mod event_processor_test;
 
-#[cfg(any(feature = "fuzzing", test))]
+#[cfg(any(test, feature = "fuzzing"))]
 #[path = "event_processor_fuzzing.rs"]
 pub mod event_processor_fuzzing;
 
@@ -756,16 +755,15 @@ impl<T: Payload> EventProcessor<T> {
 
         let vote_proposal = VoteProposal::new(
             AccumulatorExtensionProof::<TransactionAccumulatorHasher>::new(
-                parent_block
-                    .executed_trees()
-                    .txn_accumulator()
-                    .frozen_subtree_roots()
+                parent_block.compute_result().frozen_subtree_roots().clone(),
+                parent_block.compute_result().num_leaves(),
+                executed_block
+                    .compute_result()
+                    .transaction_info_hashes()
                     .clone(),
-                parent_block.executed_trees().txn_accumulator().num_leaves(),
-                executed_block.transaction_info_hashes(),
             ),
             block.clone(),
-            executed_block.compute_result().executed_state.validators,
+            executed_block.compute_result().validators().clone(),
         );
 
         let vote = self
@@ -939,24 +937,10 @@ impl<T: Payload> EventProcessor<T> {
                 counters::CREATION_TO_COMMIT_S.observe_duration(time_to_commit);
             }
             counters::COMMITTED_BLOCKS_COUNT.inc();
-            let block_txns = block.output().transaction_data();
-            counters::NUM_TXNS_PER_BLOCK.observe(block_txns.len() as f64);
+            let txn_status = block.compute_result().compute_status();
+            counters::NUM_TXNS_PER_BLOCK.observe(txn_status.len() as f64);
 
-            for txn in block_txns.iter() {
-                match txn.txn_info_hash() {
-                    Some(_) => {
-                        counters::COMMITTED_TXNS_COUNT
-                            .with_label_values(&["success"])
-                            .inc();
-                    }
-                    None => {
-                        counters::COMMITTED_TXNS_COUNT
-                            .with_label_values(&["failed"])
-                            .inc();
-                    }
-                }
-            }
-            for status in block.compute_result().compute_status.iter() {
+            for status in txn_status.iter() {
                 match status {
                     TransactionStatus::Keep(_) => {
                         counters::COMMITTED_TXNS_COUNT

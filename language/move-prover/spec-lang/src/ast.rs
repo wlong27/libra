@@ -11,9 +11,13 @@ use crate::{
     ty::Type,
 };
 use std::{
+    collections::BTreeMap,
     fmt,
     fmt::{Error, Formatter},
 };
+use vm::file_format::CodeOffset;
+
+use move_lang::parser::ast::{self as PA};
 
 // =================================================================================================
 /// # Declarations
@@ -39,16 +43,56 @@ pub struct SpecFunDecl {
 /// # Conditions
 
 #[derive(Debug, PartialEq)]
-pub enum ConditionKind {
+pub enum SpecConditionKind {
+    Assert,
+    Assume,
+    Decreases,
     AbortsIf,
     Ensures,
+    Requires,
+}
+
+impl SpecConditionKind {
+    pub fn new(kind: &PA::SpecConditionKind) -> Self {
+        use SpecConditionKind::*;
+        match kind {
+            PA::SpecConditionKind::Assert => Assert,
+            PA::SpecConditionKind::Assume => Assume,
+            PA::SpecConditionKind::Decreases => Decreases,
+            PA::SpecConditionKind::Ensures => Ensures,
+            PA::SpecConditionKind::Requires => Requires,
+            PA::SpecConditionKind::AbortsIf => AbortsIf,
+        }
+    }
+
+    pub fn on_decl(&self) -> bool {
+        use SpecConditionKind::*;
+        match self {
+            AbortsIf | Ensures | Requires => true,
+            _ => false,
+        }
+    }
+
+    pub fn on_impl(&self) -> bool {
+        use SpecConditionKind::*;
+        match self {
+            Assert | Assume | Decreases => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Condition {
     pub loc: Loc,
-    pub kind: ConditionKind,
+    pub kind: SpecConditionKind,
     pub exp: Exp,
+}
+
+#[derive(Debug, Default)]
+pub struct FunSpec {
+    pub on_decl: Vec<Condition>,
+    pub on_impl: BTreeMap<CodeOffset, Vec<Condition>>,
 }
 
 // =================================================================================================
@@ -60,6 +104,7 @@ pub enum InvariantKind {
     Update,
     Pack,
     Unpack,
+    Module,
 }
 
 #[derive(Debug)]
@@ -110,6 +155,7 @@ pub enum Operation {
     Pack(ModuleId, StructId),
     Tuple,
     Select(ModuleId, StructId, FieldId),
+    Local(Symbol),
     Result(usize),
     Index,
     Slice,
@@ -147,6 +193,10 @@ pub enum Operation {
     Exists,
     Old,
     Update,
+    Sender,
+    MaxU8,
+    MaxU64,
+    MaxU128,
 }
 
 #[derive(Debug)]
@@ -161,7 +211,6 @@ pub enum Value {
     Address(BigUint),
     Number(BigUint),
     Bool(bool),
-    Bytearray(Vec<u8>),
 }
 
 // =================================================================================================

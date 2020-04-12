@@ -12,21 +12,34 @@
 mod state_view;
 
 pub use crate::state_view::VerifiedStateView;
-use anyhow::{Error, Result};
-use futures::stream::{BoxStream, StreamExt};
+use anyhow::{format_err, Error, Result};
+use futures::{
+    executor::block_on,
+    stream::{BoxStream, StreamExt},
+};
 use libra_crypto::HashValue;
 use libra_types::{
+    access_path::AccessPath,
     account_address::AccountAddress,
-    account_state_blob::AccountStateBlob,
-    crypto_proxies::ValidatorChangeProof,
+    account_state::AccountState,
+    account_state_blob::{AccountStateBlob, AccountStateWithProof},
+    contract_event::ContractEvent,
+    event::EventKey,
     get_with_proof::{
         RequestItem, ResponseItem, UpdateToLatestLedgerRequest, UpdateToLatestLedgerResponse,
     },
     ledger_info::LedgerInfoWithSignatures,
     proof::{AccumulatorConsistencyProof, SparseMerkleProof, SparseMerkleRangeProof},
-    transaction::{TransactionListWithProof, TransactionToCommit, Version},
+    transaction::{TransactionListWithProof, TransactionToCommit, TransactionWithProof, Version},
+    validator_change::ValidatorChangeProof,
 };
-use std::{convert::TryFrom, net::SocketAddr, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryFrom,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+use storage_interface::{DbReader, DbWriter};
 use storage_proto::{
     proto::storage::{
         storage_client::StorageClient, GetLatestStateRootRequest, GetStartupInfoRequest,
@@ -39,6 +52,7 @@ use storage_proto::{
     GetLatestStateRootResponse, GetStartupInfoResponse, GetTransactionsRequest,
     GetTransactionsResponse, SaveTransactionsRequest, StartupInfo,
 };
+use tokio::runtime::Runtime;
 
 /// This provides storage read interfaces backed by real storage service.
 pub struct StorageReadServiceClient {
@@ -275,6 +289,54 @@ impl StorageRead for StorageReadServiceClient {
             .boxed();
         Ok(stream)
     }
+
+    // TODO migrate this to `ConfigStorage` trait as non-async
+    // and implement for DbReader once `StorageRead` is deprecated
+    async fn batch_fetch_config(&self, access_paths: Vec<AccessPath>) -> Result<Vec<Vec<u8>>> {
+        // some access paths can have the same address, so don't duplicate requests for them
+        let addresses: Vec<AccountAddress> = access_paths
+            .iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .map(|path| path.address)
+            .collect();
+
+        let requests: Vec<RequestItem> = addresses
+            .iter()
+            .map(|addr| RequestItem::GetAccountState { address: *addr })
+            .collect();
+
+        let responses = self.update_to_latest_ledger(0, requests).await?.0;
+
+        // Account address --> AccountState
+        let account_states = addresses
+            .into_iter()
+            .zip(responses)
+            .map(|(addr, resp)| {
+                let account_state = AccountState::try_from(
+                    &resp
+                        .into_get_account_state_response()?
+                        .blob
+                        .ok_or_else(|| {
+                            format_err!("missing blob in account state/account does not exist")
+                        })?,
+                )?;
+                Ok((addr, account_state))
+            })
+            .collect::<Result<HashMap<_, AccountState>>>()?;
+
+        access_paths
+            .into_iter()
+            .map(|path| {
+                Ok(account_states
+                    .get(&path.address)
+                    .ok_or_else(|| format_err!("missing account state for queried access path"))?
+                    .get(&path.path)
+                    .ok_or_else(|| format_err!("no value found in account state"))?
+                    .clone())
+            })
+            .collect()
+    }
 }
 
 /// This provides storage write interfaces backed by real storage service.
@@ -429,6 +491,10 @@ pub trait StorageRead: Send + Sync {
         start_version: Version,
         num_transaction_infos: u64,
     ) -> Result<BoxStream<'_, Result<BackupTransactionInfoResponse, Error>>>;
+
+    /// Returns a vector of on-chain configs as serialized byte array
+    /// Order of on-chain configs returned matches the order of `access_path`
+    async fn batch_fetch_config(&self, access_paths: Vec<AccessPath>) -> Result<Vec<Vec<u8>>>;
 }
 
 /// This trait defines interfaces to be implemented by a storage write client.
@@ -447,4 +513,140 @@ pub trait StorageWrite: Send + Sync {
         first_version: Version,
         ledger_info_with_sigs: Option<LedgerInfoWithSignatures>,
     ) -> Result<()>;
+}
+
+pub struct SyncStorageClient {
+    reader: Arc<StorageReadServiceClient>,
+    writer: Arc<StorageWriteServiceClient>,
+    rt: Runtime,
+}
+
+impl SyncStorageClient {
+    pub fn new(address: &SocketAddr) -> Self {
+        let rt = tokio::runtime::Builder::new()
+            .threaded_scheduler()
+            .enable_all()
+            .thread_name("tokio-executor")
+            .build()
+            .unwrap();
+        Self {
+            reader: Arc::new(StorageReadServiceClient::new(address)),
+            writer: Arc::new(StorageWriteServiceClient::new(address)),
+            rt,
+        }
+    }
+}
+
+impl DbReader for SyncStorageClient {
+    fn get_transactions(
+        &self,
+        _start_version: u64,
+        _batch_size: u64,
+        _ledger_version: u64,
+        _fetch_events: bool,
+    ) -> Result<TransactionListWithProof> {
+        unimplemented!()
+    }
+
+    fn get_events(
+        &self,
+        _event_key: &EventKey,
+        _start: u64,
+        _ascending: bool,
+        _limit: u64,
+    ) -> Result<Vec<(u64, ContractEvent)>> {
+        unimplemented!()
+    }
+
+    fn get_latest_account_state(
+        &self,
+        _address: AccountAddress,
+    ) -> Result<Option<AccountStateBlob>> {
+        unimplemented!()
+    }
+
+    fn get_latest_ledger_info(&self) -> Result<LedgerInfoWithSignatures> {
+        unimplemented!()
+    }
+
+    fn get_startup_info(&self) -> Result<Option<StartupInfo>> {
+        let reader = Arc::clone(&self.reader);
+        block_on(
+            self.rt
+                .spawn(async move { reader.get_startup_info().await }),
+        )?
+    }
+
+    fn get_txn_by_account(
+        &self,
+        _address: AccountAddress,
+        _seq_num: u64,
+        _ledger_version: u64,
+        _fetch_events: bool,
+    ) -> Result<Option<TransactionWithProof>> {
+        unimplemented!()
+    }
+
+    fn get_state_proof(
+        &self,
+        _known_version: u64,
+    ) -> Result<(
+        LedgerInfoWithSignatures,
+        ValidatorChangeProof,
+        AccumulatorConsistencyProof,
+    )> {
+        unimplemented!()
+    }
+
+    fn get_account_state_with_proof(
+        &self,
+        _address: AccountAddress,
+        _version: u64,
+        _ledger_version: u64,
+    ) -> Result<AccountStateWithProof> {
+        unimplemented!()
+    }
+
+    fn get_account_state_with_proof_by_version(
+        &self,
+        address: AccountAddress,
+        version: u64,
+    ) -> Result<(Option<AccountStateBlob>, SparseMerkleProof)> {
+        let reader = Arc::clone(&self.reader);
+        block_on(self.rt.spawn(async move {
+            reader
+                .get_account_state_with_proof_by_version(address, version)
+                .await
+        }))?
+    }
+
+    fn get_latest_state_root(&self) -> Result<(Version, HashValue)> {
+        let reader = Arc::clone(&self.reader);
+        block_on(
+            self.rt
+                .spawn(async move { reader.get_latest_state_root().await }),
+        )?
+    }
+}
+
+impl DbWriter for SyncStorageClient {
+    fn save_transactions(
+        &self,
+        txns_to_commit: &[TransactionToCommit],
+        first_version: u64,
+        ledger_info_with_sigs: Option<&LedgerInfoWithSignatures>,
+    ) -> Result<()> {
+        let writer = Arc::clone(&self.writer);
+        let txns_to_commit_clone = txns_to_commit.to_vec();
+        let ledger_info_with_sigs_clone = ledger_info_with_sigs.cloned();
+        block_on(self.rt.spawn(async move {
+            writer
+                .save_transactions(
+                    txns_to_commit_clone,
+                    first_version,
+                    ledger_info_with_sigs_clone,
+                )
+                .await
+        }))?
+    }
 }

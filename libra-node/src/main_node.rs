@@ -7,17 +7,25 @@ use debug_interface::{
     node_debug_service::NodeDebugService,
     proto::node_debug_interface_server::NodeDebugInterfaceServer,
 };
-use executor::Executor;
+use executor::{db_bootstrapper::maybe_bootstrap_db, Executor};
 use futures::{channel::mpsc::channel, executor::block_on};
 use libra_config::config::{NetworkConfig, NodeConfig, RoleType};
 use libra_json_rpc::bootstrap_from_config as bootstrap_rpc;
 use libra_logger::prelude::*;
+use libra_mempool::MEMPOOL_SUBSCRIBED_CONFIGS;
 use libra_metrics::metric_server;
+use libra_types::event_subscription::ReconfigSubscription;
 use libra_vm::LibraVM;
 use network::validator_network::network_builder::{NetworkBuilder, TransportType};
 use state_synchronizer::StateSynchronizer;
-use std::{collections::HashMap, net::ToSocketAddrs, sync::Arc, thread, time::Instant};
-use storage_client::{StorageReadServiceClient, StorageWriteServiceClient};
+use std::{
+    collections::HashMap,
+    net::ToSocketAddrs,
+    sync::{Arc, Mutex},
+    thread,
+    time::Instant,
+};
+use storage_client::SyncStorageClient;
 use storage_service::{init_libra_db, start_storage_service_with_db};
 use tokio::runtime::{Builder, Runtime};
 
@@ -43,15 +51,10 @@ impl Drop for LibraHandle {
     }
 }
 
-fn setup_executor(config: &NodeConfig) -> Arc<Executor<LibraVM>> {
-    let storage_read_client = Arc::new(StorageReadServiceClient::new(&config.storage.address));
-    let storage_write_client = Arc::new(StorageWriteServiceClient::new(&config.storage.address));
-
-    Arc::new(Executor::new(
-        storage_read_client,
-        storage_write_client,
-        config,
-    ))
+fn setup_executor(config: &NodeConfig) -> Arc<Mutex<Executor<LibraVM>>> {
+    let db_reader = Arc::new(SyncStorageClient::new(&config.storage.address));
+    let db_writer = Arc::clone(&db_reader);
+    Arc::new(Mutex::new(Executor::new(db_reader, db_writer)))
 }
 
 fn setup_debug_interface(config: &NodeConfig) -> Runtime {
@@ -166,6 +169,7 @@ pub fn setup_environment(node_config: &mut NodeConfig) -> LibraHandle {
     let mut instant = Instant::now();
     let libra_db = init_libra_db(&node_config);
     let storage = start_storage_service_with_db(&node_config, Arc::clone(&libra_db));
+    maybe_bootstrap_db::<LibraVM>(node_config).expect("Db-bootstrapper should not fail.");
 
     debug!(
         "Storage service started in {} ms",
@@ -179,10 +183,11 @@ pub fn setup_environment(node_config: &mut NodeConfig) -> LibraHandle {
     let mut state_sync_network_handles = vec![];
     let mut mempool_network_handles = vec![];
     let mut validator_network_provider = None;
-    let mut reconfig_event_subscriptions = vec![];
+    let mut reconfig_subscriptions = vec![];
+
     let (mempool_reconfig_subscription, mempool_reconfig_events) =
-        libra_mempool::generate_reconfig_subscription();
-    reconfig_event_subscriptions.push(mempool_reconfig_subscription);
+        ReconfigSubscription::subscribe(MEMPOOL_SUBSCRIBED_CONFIGS);
+    reconfig_subscriptions.push(mempool_reconfig_subscription);
 
     if let Some(network) = node_config.validator_network.as_mut() {
         let (runtime, mut network_builder) = setup_network(network, RoleType::Validator);
@@ -221,13 +226,13 @@ pub fn setup_environment(node_config: &mut NodeConfig) -> LibraHandle {
         state_sync_to_mempool_sender,
         Arc::clone(&executor),
         &node_config,
-        reconfig_event_subscriptions,
+        reconfig_subscriptions,
     );
     let (mp_client_sender, mp_client_events) = channel(AC_SMP_CHANNEL_BUFFER_SIZE);
 
     let admission_control_runtime =
         AdmissionControlService::bootstrap(&node_config, mp_client_sender.clone());
-    let rpc_runtime = bootstrap_rpc(&node_config, libra_db, mp_client_sender);
+    let rpc_runtime = bootstrap_rpc(&node_config, libra_db.clone(), mp_client_sender);
 
     let mut consensus = None;
     let (consensus_to_mempool_sender, consensus_requests) = channel(INTRA_NODE_CHANNEL_BUFFER_SIZE);
@@ -277,6 +282,7 @@ pub fn setup_environment(node_config: &mut NodeConfig) -> LibraHandle {
             executor,
             state_synchronizer.create_client(),
             consensus_to_mempool_sender,
+            libra_db,
         );
         consensus_provider
             .start()

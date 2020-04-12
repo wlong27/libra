@@ -5,7 +5,7 @@
 
 use crate::{
     ast::QualifiedSymbol,
-    env::{ModuleId, StructId},
+    env::{GlobalEnv, ModuleId, StructEnv, StructId},
     symbol::SymbolPool,
 };
 use std::{collections::BTreeMap, fmt, fmt::Formatter};
@@ -31,6 +31,7 @@ pub enum Type {
 }
 
 pub const BOOL_TYPE: Type = Type::Primitive(PrimitiveType::Bool);
+pub const NUM_TYPE: Type = Type::Primitive(PrimitiveType::Num);
 
 /// Represents a primitive (builtin) type.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
@@ -39,7 +40,6 @@ pub enum PrimitiveType {
     U8,
     U64,
     U128,
-    ByteArray,
     Address,
 
     // Types only appearing in specifications
@@ -73,14 +73,11 @@ impl Type {
 
     /// Determines whether this is a reference.
     pub fn is_reference(&self) -> bool {
-        match self {
-            Type::Reference(_, _) => true,
-            _ => false,
-        }
+        matches!(self, Type::Reference(_, _))
     }
 
-    /// Determines whether this is a mutual reference.
-    pub fn is_mutual_reference(&self) -> bool {
+    /// Determines whether this is a mutable reference.
+    pub fn is_mutable_reference(&self) -> bool {
         if let Type::Reference(true, _) = self {
             true
         } else {
@@ -88,6 +85,7 @@ impl Type {
         }
     }
 
+    /// Returns true if this is any number type.
     pub fn is_number(&self) -> bool {
         if let Type::Primitive(p) = self {
             if let PrimitiveType::U8
@@ -99,6 +97,18 @@ impl Type {
             }
         }
         false
+    }
+
+    /// If this is a struct type, return the associated struct env and type parameters.
+    pub fn get_struct<'env>(
+        &'env self,
+        env: &'env GlobalEnv,
+    ) -> Option<(StructEnv<'env>, &'env [Type])> {
+        if let Type::Struct(module_idx, struct_idx, params) = self {
+            Some((env.get_module(*module_idx).into_struct(*struct_idx), params))
+        } else {
+            None
+        }
     }
 
     /// Instantiates type parameters in this type.
@@ -335,22 +345,27 @@ impl Substitution {
     ) -> Result<Option<Type>, TypeError> {
         if let Type::Var(v1) = t1 {
             if let Some(s1) = self.subs.get(&v1).cloned() {
-                if swapped {
+                return if swapped {
                     // Place the type terms in the right order again, so we
                     // get the 'expected vs actual' direction right.
-                    return Ok(Some(self.unify(display_context, t2, &s1)?));
+                    Ok(Some(self.unify(display_context, t2, &s1)?))
                 } else {
-                    return Ok(Some(self.unify(display_context, &s1, t2)?));
-                }
+                    Ok(Some(self.unify(display_context, &s1, t2)?))
+                };
             }
-            let is_var = |t: &Type| {
+            let is_t1_var = |t: &Type| {
                 if let Type::Var(v2) = t {
                     v1 == v2
                 } else {
                     false
                 }
             };
-            if !t2.contains(&is_var) {
+            // Skip the cycle check if we are unifying the same two variables.
+            if is_t1_var(t2) {
+                return Ok(Some(t1.clone()));
+            }
+            // Cycle check.
+            if !t2.contains(&is_t1_var) {
                 self.subs.insert(*v1, t2.clone());
                 Ok(Some(t2.clone()))
             } else {
@@ -457,7 +472,6 @@ impl fmt::Display for PrimitiveType {
             U8 => f.write_str("u8"),
             U64 => f.write_str("u64"),
             U128 => f.write_str("u128"),
-            ByteArray => f.write_str("bytearray"),
             Address => f.write_str("address"),
             Range => f.write_str("range"),
             Num => f.write_str("num"),

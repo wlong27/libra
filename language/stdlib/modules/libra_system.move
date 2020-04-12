@@ -16,10 +16,12 @@ module LibraSystem {
     }
 
     struct ValidatorSetChangeEvent {
-        new_validator_set: vector<ValidatorInfo>,
+        last_reconfiguration_time: u64,
     }
 
     resource struct ValidatorSet {
+        // The current consensus crypto scheme.
+        scheme: u8,
         // The current validator set. Updated only at epoch boundaries via reconfiguration.
         validators: vector<ValidatorInfo>,
         // Last time when a reconfiguration happened.
@@ -54,6 +56,7 @@ module LibraSystem {
       Transaction::assert(Transaction::sender() == 0x1D8, 1);
 
       move_to_sender<ValidatorSet>(ValidatorSet {
+          scheme: 0,
           validators: Vector::empty(),
           last_reconfiguration_time: 0,
           change_events: LibraAccount::new_event_handle<ValidatorSetChangeEvent>(),
@@ -335,14 +338,20 @@ module LibraSystem {
    }
 
    fun reconfigure_() acquires ValidatorSet {
+       // Do not do anything if time is not set up yet.
+       if(LibraTimestamp::is_genesis()) {
+           return ()
+       };
+
        let validator_set_ref = borrow_global_mut<ValidatorSet>(0x1D8);
-       let current_block_time = LibraTimestamp::now_microseconds();
 
        // Ensure that there is at most one reconfiguration per transaction. This ensures that there is a 1-1
        // correspondence between system reconfigurations and emitted ReconfigurationEvents.
-       Transaction::assert(current_block_time > validator_set_ref.last_reconfiguration_time, 23);
 
+       let current_block_time = LibraTimestamp::now_microseconds();
+       Transaction::assert(current_block_time > validator_set_ref.last_reconfiguration_time, 23);
        validator_set_ref.last_reconfiguration_time = current_block_time;
+
        emit_reconfiguration_event();
    }
 
@@ -354,7 +363,7 @@ module LibraSystem {
        LibraAccount::emit_event<ValidatorSetChangeEvent>(
            &mut validator_set_ref.change_events,
            ValidatorSetChangeEvent {
-               new_validator_set: *&validator_set_ref.validators,
+               last_reconfiguration_time: validator_set_ref.last_reconfiguration_time,
            },
        );
    }

@@ -8,7 +8,7 @@ use anyhow::{Error, Result};
 use proptest::prelude::*;
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
-use serde::{de, ser};
+use serde::{de, ser, Deserialize, Serialize};
 use std::{convert::TryFrom, fmt};
 
 /// The minimum status code for validation statuses
@@ -43,7 +43,7 @@ pub static EXECUTION_STATUS_MAX_CODE: u64 = 4999;
 
 /// A `VMStatus` is represented as a required major status that is semantic coupled with with
 /// an optional sub status and message.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize, Deserialize)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
 #[cfg_attr(any(test, feature = "fuzzing"), proptest(no_params))]
 pub struct VMStatus {
@@ -378,7 +378,7 @@ pub enum StatusCode {
     INVALID_ACQUIRES_RESOURCE_ANNOTATION_ERROR = 1073,
     GLOBAL_REFERENCE_ERROR = 1074,
     CONTRAINT_KIND_MISMATCH = 1075,
-    NUMBER_OF_TYPE_ACTUALS_MISMATCH = 1076,
+    NUMBER_OF_TYPE_ARGUMENTS_MISMATCH = 1076,
     LOOP_IN_INSTANTIATION_GRAPH = 1077,
     UNUSED_LOCALS_SIGNATURE = 1078,
     UNUSED_TYPE_SIGNATURE = 1079,
@@ -418,6 +418,15 @@ pub enum StatusCode {
     UNEXPECTED_SIGNATURE_TYPE = 3009,
     DUPLICATE_TABLE = 3010,
     VERIFIER_INVARIANT_VIOLATION = 3011,
+    UNKNOWN_NOMINAL_RESOURCE = 3012,
+    UNKNOWN_KIND = 3013,
+    UNKNOWN_NATIVE_STRUCT_FLAG = 3014,
+    BAD_ULEB_U16 = 3015,
+    BAD_ULEB_U32 = 3016,
+    BAD_U16 = 3017,
+    BAD_U32 = 3018,
+    BAD_U64 = 3019,
+    BAD_U128 = 3020,
 
     // Errors that can arise at runtime
     // Runtime Errors: 4000-4999
@@ -591,7 +600,7 @@ impl TryFrom<u64> for StatusCode {
             1073 => Ok(StatusCode::INVALID_ACQUIRES_RESOURCE_ANNOTATION_ERROR),
             1074 => Ok(StatusCode::GLOBAL_REFERENCE_ERROR),
             1075 => Ok(StatusCode::CONTRAINT_KIND_MISMATCH),
-            1076 => Ok(StatusCode::NUMBER_OF_TYPE_ACTUALS_MISMATCH),
+            1076 => Ok(StatusCode::NUMBER_OF_TYPE_ARGUMENTS_MISMATCH),
             1077 => Ok(StatusCode::LOOP_IN_INSTANTIATION_GRAPH),
             1078 => Ok(StatusCode::UNUSED_LOCALS_SIGNATURE),
             1079 => Ok(StatusCode::UNUSED_TYPE_SIGNATURE),
@@ -678,6 +687,8 @@ pub mod sub_status {
 
     // Native Function Error sub-codes
     pub const NFE_VECTOR_ERROR_BASE: u64 = 0;
+    // Failure in LCS deserialization
+    pub const NFE_LCS_SERIALIZATION_FAILURE: u64 = 0x1C5;
 
     pub const GSE_UNABLE_TO_LOAD_MODULE: u64 = 0;
     pub const GSE_UNABLE_TO_LOAD_RESOURCE: u64 = 1;

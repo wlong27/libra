@@ -56,8 +56,8 @@ variable "num_validators" {
 }
 
 variable "num_validators_in_genesis" {
-  default     = 4
-  description = "Number of validator nodes to include in genesis blob"
+  default     = 0
+  description = "Number of validator nodes to include in genesis blob, 0 will default to using num_validators"
 }
 
 # This allows you to use a override number of validators for config generation
@@ -160,6 +160,12 @@ variable "log_path" {
   default = "/opt/libra/data/libra.log"
 }
 
+variable "structlog_path" {
+  description = "Structured log path"
+  type        = string
+  default     = "/opt/libra/data/libra_structlog.log"
+}
+
 variable "enable_logstash" {
   type        = bool
   description = "Enable logstash instance on validator to send logs to elasticservice, this will enable log_to_file"
@@ -201,4 +207,26 @@ variable "restore_vol_id" {
 variable "permissions_boundary_policy" {
   default     = ""
   description = "ARN of IAM policy to set as permissions boundary on created roles"
+}
+
+variable "override_image_tags" {
+  type        = list(string)
+  default     = []
+  description = "List of Docker image tags to be used in record and replay test, overrides image_tag"
+}
+
+variable "vault_type" {
+  description = "EC2 instance type of Vault instances"
+  default     = "c5.large"
+}
+
+variable "safety_rules_use_vault" {
+  description = "Configure safety-rules to use Vault as the backend"
+  default     = false
+}
+
+variable "persist_libra_data" {
+  type        = bool
+  default     = true
+  description = "Whether to persist libra data on validator and fullnode between restarts"
 }

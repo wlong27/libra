@@ -5,12 +5,15 @@ mod state;
 
 use super::{
     absint::*,
-    ast,
-    ast::*,
     cfg::{BlockCFG, ReverseBlockCFG, CFG},
     locals,
 };
-use crate::{errors::*, parser::ast::Var, shared::unique_map::UniqueMap};
+use crate::{
+    errors::*,
+    hlir::ast::{self as H, *},
+    parser::ast::Var,
+    shared::unique_map::UniqueMap,
+};
 use move_ir_types::location::*;
 use state::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -93,6 +96,7 @@ fn command(state: &mut LivenessState, sp!(_, cmd_): &Command) {
         }
 
         C::Jump(_) => (),
+        C::Break | C::Continue => panic!("ICE break/continue not translated to jumps"),
     }
 }
 
@@ -119,6 +123,10 @@ fn exp(state: &mut LivenessState, parent_e: &Exp) {
         E::BorrowLocal(_, var) | E::Copy { var, .. } | E::Move { var, .. } => {
             state.0.insert(var.clone());
         }
+
+        E::Spec(_, used_locals) => used_locals.keys().for_each(|v| {
+            state.0.insert(v.clone());
+        }),
 
         E::ModuleCall(mcall) => exp(state, &mcall.arguments),
         E::Builtin(_, e)
@@ -173,9 +181,12 @@ pub fn last_usage(
 
 mod last_usage {
     use crate::{
-        cfgir::{ast::*, liveness::state::LivenessState},
+        cfgir::liveness::state::LivenessState,
         errors::*,
-        hlir::translate::{display_var, DisplayVar},
+        hlir::{
+            ast::*,
+            translate::{display_var, DisplayVar},
+        },
         parser::ast::Var,
         shared::{unique_map::*, *},
     };
@@ -265,6 +276,7 @@ mod last_usage {
             | C::JumpIf { cond: e, .. } => exp(context, e),
 
             C::Jump(_) => (),
+            C::Break | C::Continue => panic!("ICE break/continue not translated to jumps"),
         }
     }
 
@@ -309,6 +321,13 @@ mod last_usage {
                 context.dropped_live.remove(var);
             }
 
+            E::Spec(_, used_locals) => {
+                // remove it from context to prevent accidental dropping in previous usages
+                used_locals.keys().for_each(|var| {
+                    context.dropped_live.remove(var);
+                })
+            }
+
             E::Copy { var, from_user } => {
                 // Even if not switched to a move:
                 // remove it from dropped_live to prevent accidental dropping in previous usages
@@ -316,10 +335,10 @@ mod last_usage {
                 // Non-references might still be borrowed
                 // Switching such non-locals to a copy is an optimization and not
                 // needed for this refinement
-                let is_reference = match &parent_e.ty.value {
-                    Type_::Single(sp!(_, SingleType_::Ref(_, _))) => true,
-                    _ => false,
-                };
+                let is_reference = matches!(
+                    &parent_e.ty.value,
+                    Type_::Single(sp!(_, SingleType_::Ref(_, _)))
+                );
                 if var_is_dead && is_reference && !*from_user {
                     parent_e.exp.value = E::Move {
                         var: var.clone(),
@@ -471,7 +490,7 @@ fn pop_ref(loc: Loc, var: Var, ty: SingleType) -> Command {
         from_user: false,
         var,
     };
-    let move_e = ast::exp(Type_::single(ty), sp(loc, move_e_));
+    let move_e = H::exp(Type_::single(ty), sp(loc, move_e_));
     let pop_ = C::IgnoreAndPop {
         pop_num: 1,
         exp: move_e,

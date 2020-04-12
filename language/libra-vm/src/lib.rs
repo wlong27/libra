@@ -104,6 +104,7 @@
 extern crate mirai_annotations;
 #[macro_use]
 mod counters;
+pub mod on_chain_configs;
 
 #[cfg(feature = "mirai-contracts")]
 pub mod foreign_contracts;
@@ -114,12 +115,11 @@ mod unit_tests;
 
 pub mod system_module_names;
 
-pub use libra_vm::LibraVM;
+pub use crate::libra_vm::LibraVM;
 
-use libra_config::config::VMConfig;
 use libra_state_view::StateView;
 use libra_types::{
-    transaction::{SignedTransaction, Transaction, TransactionOutput},
+    transaction::{SignedTransaction, Transaction, TransactionOutput, VMValidatorResult},
     vm_error::VMStatus,
 };
 
@@ -132,7 +132,7 @@ pub trait VMVerifier {
         &self,
         transaction: SignedTransaction,
         state_view: &dyn StateView,
-    ) -> Option<VMStatus>;
+    ) -> VMValidatorResult;
 }
 
 /// This trait describes the VM's execution interface.
@@ -145,7 +145,6 @@ pub trait VMExecutor {
     /// Executes a block of transactions and returns output for each one of them.
     fn execute_block(
         transactions: Vec<Transaction>,
-        config: &VMConfig,
         state_view: &dyn StateView,
     ) -> Result<Vec<TransactionOutput>, VMStatus>;
 }

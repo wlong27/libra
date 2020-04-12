@@ -3,6 +3,7 @@
 
 use crate::{
     cluster::Cluster,
+    cluster_swarm::ClusterSwarm,
     effects::{Effect, StopContainer},
     experiments::{Context, Experiment, ExperimentParam},
     instance,
@@ -11,9 +12,13 @@ use crate::{
     tx_emitter::EmitJobRequest,
     util::unix_timestamp_now,
 };
+use anyhow::Result;
 use async_trait::async_trait;
 use debug_interface::node_debug_service::parse_event;
-use futures::{future::join_all, join};
+use futures::{
+    future::{join_all, try_join_all},
+    join,
+};
 use libra_logger::info;
 use serde_json::Value;
 use std::{
@@ -32,11 +37,6 @@ pub struct PerformanceBenchmarkParams {
         help = "Percent of nodes which should be down"
     )]
     pub percent_nodes_down: usize,
-    #[structopt(
-        long,
-        help = "Whether cluster test should run against validators or full nodes"
-    )]
-    pub is_fullnode: bool,
     #[structopt(long, help = "Whether benchmark should perform trace")]
     pub trace: bool,
     #[structopt(
@@ -48,8 +48,9 @@ pub struct PerformanceBenchmarkParams {
 }
 
 pub struct PerformanceBenchmark {
-    down_instances: Vec<Instance>,
-    up_instances: Vec<Instance>,
+    down_validators: Vec<Instance>,
+    up_validators: Vec<Instance>,
+    up_fullnodes: Vec<Instance>,
     percent_nodes_down: usize,
     duration: Duration,
     trace: bool,
@@ -61,7 +62,6 @@ impl PerformanceBenchmarkParams {
     pub fn new_nodes_down(percent_nodes_down: usize) -> Self {
         Self {
             percent_nodes_down,
-            is_fullnode: false,
             duration: DEFAULT_BENCH_DURATION,
             trace: false,
         }
@@ -71,28 +71,27 @@ impl PerformanceBenchmarkParams {
 impl ExperimentParam for PerformanceBenchmarkParams {
     type E = PerformanceBenchmark;
     fn build(self, cluster: &Cluster) -> Self::E {
-        if self.is_fullnode {
-            let num_nodes = cluster.fullnode_instances().len();
-            let nodes_down = (num_nodes * self.percent_nodes_down) / 100;
-            let (down_instances, up_instances) = cluster.split_n_fullnodes_random(nodes_down);
-            Self::E {
-                down_instances: down_instances.into_fullnode_instances(),
-                up_instances: up_instances.into_fullnode_instances(),
-                percent_nodes_down: self.percent_nodes_down,
-                duration: Duration::from_secs(self.duration),
-                trace: self.trace,
-            }
-        } else {
-            let num_nodes = cluster.validator_instances().len();
-            let nodes_down = (num_nodes * self.percent_nodes_down) / 100;
-            let (down_instances, up_instances) = cluster.split_n_validators_random(nodes_down);
-            Self::E {
-                down_instances: down_instances.into_validator_instances(),
-                up_instances: up_instances.into_validator_instances(),
-                percent_nodes_down: self.percent_nodes_down,
-                duration: Duration::from_secs(self.duration),
-                trace: self.trace,
-            }
+        let all_fullnode_instances = cluster.fullnode_instances();
+        let num_nodes = cluster.validator_instances().len();
+        let nodes_down = (num_nodes * self.percent_nodes_down) / 100;
+        let (down, up) = cluster.split_n_validators_random(nodes_down);
+        let up_validators = up.into_validator_instances();
+        let up_fullnodes: Vec<_> = up_validators
+            .iter()
+            .filter_map(|val| {
+                all_fullnode_instances
+                    .iter()
+                    .find(|x| val.validator_index() == x.validator_index())
+                    .cloned()
+            })
+            .collect();
+        Self::E {
+            down_validators: down.into_validator_instances(),
+            up_validators,
+            up_fullnodes,
+            percent_nodes_down: self.percent_nodes_down,
+            duration: Duration::from_secs(self.duration),
+            trace: self.trace,
         }
     }
 }
@@ -100,24 +99,40 @@ impl ExperimentParam for PerformanceBenchmarkParams {
 #[async_trait]
 impl Experiment for PerformanceBenchmark {
     fn affected_validators(&self) -> HashSet<String> {
-        instance::instancelist_to_set(&self.down_instances)
+        instance::instancelist_to_set(&self.down_validators)
     }
 
-    async fn run(&mut self, context: &mut Context<'_>) -> anyhow::Result<()> {
+    async fn run(&mut self, context: &mut Context<'_>) -> Result<()> {
         let stop_effects: Vec<_> = self
-            .down_instances
+            .down_validators
             .clone()
             .into_iter()
             .map(StopContainer::new)
             .collect();
-        let futures = stop_effects.iter().map(|e| e.activate());
-        join_all(futures).await;
+        if let Some(cluster_swarm) = context.cluster_swarm {
+            let instance_configs = instance::instance_configs(&self.down_validators)?;
+            let futures: Vec<_> = instance_configs
+                .into_iter()
+                .map(|ic| cluster_swarm.delete_node(ic.clone()))
+                .collect();
+            try_join_all(futures).await?;
+        } else {
+            let futures = stop_effects.iter().map(|e| e.activate());
+            join_all(futures).await;
+        }
         let buffer = Duration::from_secs(60);
         let window = self.duration + buffer * 2;
-        let emit_job_request = EmitJobRequest::for_instances(
-            self.up_instances.clone(),
-            context.global_emit_job_request,
-        );
+        let emit_job_request = if context.emit_to_validator {
+            EmitJobRequest::for_instances(
+                self.up_validators.clone(),
+                context.global_emit_job_request,
+            )
+        } else {
+            EmitJobRequest::for_instances(
+                self.up_fullnodes.clone(),
+                context.global_emit_job_request,
+            )
+        };
         let emit_txn = context.tx_emitter.emit_txn_for(window, emit_job_request);
         let trace_tail = &context.trace_tail;
         let trace_delay = buffer;
@@ -160,8 +175,17 @@ impl Experiment for PerformanceBenchmark {
             "Link to dashboard : {}",
             context.prometheus.link_to_dashboard(start, end)
         );
-        let futures = stop_effects.iter().map(|e| e.deactivate());
-        join_all(futures).await;
+        if let Some(cluster_swarm) = context.cluster_swarm {
+            let instance_configs = instance::instance_configs(&self.down_validators)?;
+            let futures: Vec<_> = instance_configs
+                .into_iter()
+                .map(|ic| cluster_swarm.upsert_node(ic.clone(), false))
+                .collect();
+            try_join_all(futures).await?;
+        } else {
+            let futures = stop_effects.iter().map(|e| e.deactivate());
+            join_all(futures).await;
+        }
         let submitted_txn = stats.submitted.load(Ordering::Relaxed);
         let expired_txn = stats.expired.load(Ordering::Relaxed);
         context

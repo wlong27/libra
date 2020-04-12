@@ -36,7 +36,7 @@ fn count(cfg: &BlockCFG) -> BTreeSet<Var> {
 
 mod count {
     use crate::{
-        cfgir::ast::*,
+        hlir::ast::*,
         parser::ast::{BinOp, UnaryOp, Var},
         shared::*,
     };
@@ -66,8 +66,8 @@ mod count {
             }
         }
 
-        fn used(&mut self, var: &Var, is_borrow_local: bool) {
-            if is_borrow_local {
+        fn used(&mut self, var: &Var, substitutable: bool) {
+            if !substitutable {
                 self.used.insert(var.clone(), None);
                 return;
             }
@@ -111,6 +111,7 @@ mod count {
             | C::JumpIf { cond: e, .. } => exp(context, e),
 
             C::Jump(_) => (),
+            C::Break | C::Continue => panic!("ICE break/continue not translated to jumps"),
         }
     }
 
@@ -133,10 +134,13 @@ mod count {
         use UnannotatedExp_ as E;
         match &parent_e.exp.value {
             E::Unit | E::Value(_) | E::UnresolvedError => (),
+            E::Spec(_, used_locals) => {
+                used_locals.keys().for_each(|var| context.used(var, false));
+            }
 
-            E::BorrowLocal(_, var) => context.used(var, true),
+            E::BorrowLocal(_, var) => context.used(var, false),
 
-            E::Copy { var, .. } | E::Move { var, .. } => context.used(var, false),
+            E::Copy { var, .. } | E::Move { var, .. } => context.used(var, true),
 
             E::ModuleCall(mcall) => exp(context, &mcall.arguments),
             E::Builtin(_, e)
@@ -192,6 +196,7 @@ mod count {
         use UnannotatedExp_ as E;
         match &parent_e.exp.value {
             E::UnresolvedError
+            | E::Spec(_, _)
             | E::BorrowLocal(_, _)
             | E::Copy { .. }
             | E::Builtin(_, _)
@@ -277,7 +282,7 @@ fn eliminate(cfg: &mut BlockCFG, ssa_temps: BTreeSet<Var>) {
 
 mod eliminate {
     use crate::{
-        cfgir::{ast, ast::*},
+        hlir::ast::{self as H, *},
         parser::ast::Var,
     };
     use move_ir_types::location::*;
@@ -319,6 +324,7 @@ mod eliminate {
             | C::JumpIf { cond: e, .. } => exp(context, e),
 
             C::Jump(_) => (),
+            C::Break | C::Continue => panic!("ICE break/continue not translated to jumps"),
         }
     }
 
@@ -364,7 +370,7 @@ mod eliminate {
                 }
             }
 
-            E::Unit | E::Value(_) | E::UnresolvedError | E::BorrowLocal(_, _) => (),
+            E::Unit | E::Value(_) | E::Spec(_, _) | E::UnresolvedError | E::BorrowLocal(_, _) => (),
 
             E::ModuleCall(mcall) => exp(context, &mut mcall.arguments),
             E::Builtin(_, e)
@@ -453,6 +459,6 @@ mod eliminate {
     }
 
     fn unit(loc: Loc) -> Exp {
-        ast::exp(sp(loc, Type_::Unit), sp(loc, UnannotatedExp_::Unit))
+        H::exp(sp(loc, Type_::Unit), sp(loc, UnannotatedExp_::Unit))
     }
 }

@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use crate::{
-    crypto_proxies::EpochInfo,
+    epoch_info::EpochInfo,
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
     waypoint::Waypoint,
 };
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn verify_validator_set_change_proof() {
-        use crate::{crypto_proxies::random_validator_verifier, ledger_info::LedgerInfo};
+        use crate::{ledger_info::LedgerInfo, validator_verifier::random_validator_verifier};
         use libra_crypto::hash::{CryptoHash, HashValue};
         use std::collections::BTreeMap;
 
@@ -238,7 +238,7 @@ mod tests {
             );
             let signatures = current_signers
                 .iter()
-                .map(|s| (s.author(), s.sign_message(ledger_info.hash()).unwrap()))
+                .map(|s| (s.author(), s.sign_message(ledger_info.hash())))
                 .collect();
             valid_ledger_info.push(LedgerInfoWithSignatures::new(ledger_info, signatures));
             current_signers = next_signers;

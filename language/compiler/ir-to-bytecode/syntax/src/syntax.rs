@@ -6,7 +6,7 @@ use codespan::{ByteIndex, Span};
 use std::{fmt, str::FromStr};
 
 use crate::lexer::*;
-use libra_types::{account_address::AccountAddress, byte_array::ByteArray};
+use libra_types::account_address::AccountAddress;
 use move_core_types::identifier::{IdentStr, Identifier};
 use move_ir_types::{ast::*, location::*, spec_language_ast::*};
 
@@ -260,10 +260,10 @@ fn parse_copyable_val<'input>(
         }
         Tok::ByteArrayValue => {
             let s = tokens.content();
-            let buf = ByteArray::new(hex::decode(&s[2..s.len() - 1]).unwrap_or_else(|_| {
+            let buf = hex::decode(&s[2..s.len() - 1]).unwrap_or_else(|_| {
                 // The lexer guarantees this, but tracking this knowledge all the way to here is tedious
                 unreachable!("The string {:?} is not a valid hex-encoded byte array", s)
-            }));
+            });
             tokens.advance()?;
             CopyableVal_::ByteArray(buf)
         }
@@ -1130,13 +1130,13 @@ fn parse_function_block_<'input>(
 
 // Kind: Kind = {
 //     "resource" => Kind::Resource,
-//     "unrestricted" => Kind::Unrestricted,
+//     "copyable" => Kind::Copyable,
 // }
 
 fn parse_kind<'input>(tokens: &mut Lexer<'input>) -> Result<Kind, ParseError<Loc, anyhow::Error>> {
     let k = match tokens.peek() {
         Tok::Resource => Kind::Resource,
-        Tok::Unrestricted => Kind::Unrestricted,
+        Tok::Copyable => Kind::Copyable,
         _ => {
             return Err(ParseError::InvalidToken {
                 location: current_token_loc(tokens),
@@ -1179,10 +1179,6 @@ fn parse_type<'input>(tokens: &mut Lexer<'input>) -> Result<Type, ParseError<Loc
         Tok::Bool => {
             tokens.advance()?;
             Type::Bool
-        }
-        Tok::Bytearray => {
-            tokens.advance()?;
-            Type::ByteArray
         }
         Tok::Vector => {
             tokens.advance()?;
@@ -1233,7 +1229,7 @@ fn parse_type_var<'input>(
 //     <type_var: Sp<TypeVar>> <k: (":" <Kind>)?> =>? {
 // }
 
-fn parse_type_formal<'input>(
+fn parse_type_parameter<'input>(
     tokens: &mut Lexer<'input>,
 ) -> Result<(TypeVar, Kind), ParseError<Loc, anyhow::Error>> {
     let type_var = parse_type_var(tokens)?;
@@ -1269,7 +1265,7 @@ fn parse_type_actuals<'input>(
 //     <n: Name> => (n, vec![]),
 // }
 
-fn parse_name_and_type_formals<'input>(
+fn parse_name_and_type_parameters<'input>(
     tokens: &mut Lexer<'input>,
 ) -> Result<(String, Vec<(TypeVar, Kind)>), ParseError<Loc, anyhow::Error>> {
     let mut has_types = false;
@@ -1280,7 +1276,7 @@ fn parse_name_and_type_formals<'input>(
         parse_name(tokens)?
     };
     let k = if has_types {
-        let list = parse_comma_list(tokens, &[Tok::Greater], parse_type_formal, true)?;
+        let list = parse_comma_list(tokens, &[Tok::Greater], parse_type_parameter, true)?;
         consume_token(tokens, Tok::Greater)?;
         list
     } else {
@@ -1717,14 +1713,14 @@ fn parse_synthetic_<'input>(
 // }
 
 // MoveFunctionDecl : (FunctionName, Function) = {
-//     <p: Public?> <name_and_type_formals: NameAndTypeFormals> "(" <args:
+//     <p: Public?> <name_and_type_parameters: NameAndTypeFormals> "(" <args:
 //     (ArgDecl)*> ")" <ret: ReturnType?>
 //     <acquires: AcquireList?>
 //     <locals_body: FunctionBlock> =>? { ... }
 // }
 
 // NativeFunctionDecl: (FunctionName, Function) = {
-//     <nat: NativeTag> <p: Public?> <name_and_type_formals: NameAndTypeFormals>
+//     <nat: NativeTag> <p: Public?> <name_and_type_parameters: NameAndTypeFormals>
 //     "(" <args: Comma<ArgDecl>> ")" <ret: ReturnType?>
 //         <acquires: AcquireList?>
 //         ";" =>? { ... }
@@ -1749,7 +1745,7 @@ fn parse_function_decl<'input>(
         false
     };
 
-    let (name, type_formals) = parse_name_and_type_formals(tokens)?;
+    let (name, type_parameters) = parse_name_and_type_parameters(tokens)?;
     consume_token(tokens, Tok::LParen)?;
     let args = parse_comma_list(tokens, &[Tok::RParen], parse_arg_decl, true)?;
     consume_token(tokens, Tok::RParen)?;
@@ -1784,7 +1780,7 @@ fn parse_function_decl<'input>(
         },
         args,
         ret.unwrap_or_else(|| vec![]),
-        type_formals,
+        type_parameters,
         acquires.unwrap_or_else(Vec::new),
         specifications,
         if is_native {
@@ -1816,69 +1812,6 @@ fn parse_field_decl<'input>(
     Ok((f, t))
 }
 
-// Modules: Vec<ModuleDefinition> = {
-//     "modules:" <c: Module*> "script:" => c,
-// }
-
-fn parse_modules<'input>(
-    tokens: &mut Lexer<'input>,
-) -> Result<Vec<ModuleDefinition>, ParseError<Loc, anyhow::Error>> {
-    consume_token(tokens, Tok::Modules)?;
-    let mut c: Vec<ModuleDefinition> = vec![];
-    while tokens.peek() == Tok::Module {
-        c.push(parse_module(tokens)?);
-    }
-    consume_token(tokens, Tok::Script)?;
-    Ok(c)
-}
-
-// pub Program : Program = {
-//     <m: Modules?> <s: Script> => { ... },
-//     <m: Module> => { ... }
-// }
-
-fn parse_program<'input>(
-    tokens: &mut Lexer<'input>,
-) -> Result<Program, ParseError<Loc, anyhow::Error>> {
-    if tokens.peek() == Tok::Module {
-        let m = parse_module(tokens)?;
-        let loc = tokens.start_loc();
-        let ret_args = spanned(tokens.file_name(), loc, loc, Exp_::ExprList(vec![]));
-        let ret = spanned(
-            tokens.file_name(),
-            loc,
-            loc,
-            Cmd_::Return(Box::new(ret_args)),
-        );
-        let return_stmt = Statement::CommandStatement(ret);
-        let body = FunctionBody::Move {
-            locals: vec![],
-            code: Block_::new(vec![return_stmt]),
-        };
-        let main = Function_::new(
-            FunctionVisibility::Public,
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            body,
-        );
-        Ok(Program::new(
-            vec![m],
-            Script::new(vec![], vec![], spanned(tokens.file_name(), loc, loc, main)),
-        ))
-    } else {
-        let modules = if tokens.peek() == Tok::Modules {
-            parse_modules(tokens)?
-        } else {
-            vec![]
-        };
-        let s = parse_script(tokens)?;
-        Ok(Program::new(modules, s))
-    }
-}
-
 // pub Script : Script = {
 //     <imports: (ImportDecl)*>
 //     "main" "(" <args: Comma<ArgDecl>> ")" <locals_body: FunctionBlock> => { ... }
@@ -1893,6 +1826,14 @@ fn parse_script<'input>(
         imports.push(parse_import_decl(tokens)?);
     }
     consume_token(tokens, Tok::Main)?;
+    let type_formals = if tokens.peek() == Tok::Less {
+        consume_token(tokens, Tok::Less)?;
+        let list = parse_comma_list(tokens, &[Tok::Greater], parse_type_parameter, true)?;
+        consume_token(tokens, Tok::Greater)?;
+        list
+    } else {
+        vec![]
+    };
     consume_token(tokens, Tok::LParen)?;
     let args = parse_comma_list(tokens, &[Tok::RParen], parse_arg_decl, true)?;
     consume_token(tokens, Tok::RParen)?;
@@ -1902,7 +1843,7 @@ fn parse_script<'input>(
         FunctionVisibility::Public,
         args,
         vec![],
-        vec![],
+        type_formals,
         vec![],
         vec![],
         FunctionBody::Move { locals, code: body },
@@ -1916,10 +1857,10 @@ fn parse_script<'input>(
 //     "resource" => true
 // }
 // StructDecl: StructDefinition_ = {
-//     <is_nominal_resource: StructKind> <name_and_type_formals:
+//     <is_nominal_resource: StructKind> <name_and_type_parameters:
 //     NameAndTypeFormals> "{" <data: Comma<FieldDecl>> "}" =>? { ... }
 //     <native: NativeTag> <is_nominal_resource: StructKind>
-//     <name_and_type_formals: NameAndTypeFormals> ";" =>? { ... }
+//     <name_and_type_parameters: NameAndTypeFormals> ";" =>? { ... }
 // }
 
 fn parse_struct_decl<'input>(
@@ -1945,7 +1886,7 @@ fn parse_struct_decl<'input>(
     };
     tokens.advance()?;
 
-    let (name, type_formals) = parse_name_and_type_formals(tokens)?;
+    let (name, type_parameters) = parse_name_and_type_parameters(tokens)?;
 
     if is_native {
         consume_token(tokens, Tok::Semicolon)?;
@@ -1954,7 +1895,7 @@ fn parse_struct_decl<'input>(
             tokens.file_name(),
             start_loc,
             end_loc,
-            StructDefinition_::native(is_nominal_resource, name, type_formals)?,
+            StructDefinition_::native(is_nominal_resource, name, type_parameters)?,
         ));
     }
 
@@ -1979,7 +1920,7 @@ fn parse_struct_decl<'input>(
         StructDefinition_::move_declared(
             is_nominal_resource,
             name,
-            type_formals,
+            type_parameters,
             fields,
             invariants,
         )?,
@@ -2143,15 +2084,6 @@ pub fn parse_module_string(
     let mut tokens = Lexer::new(leak_str(file), input);
     tokens.advance()?;
     parse_module(&mut tokens)
-}
-
-pub fn parse_program_string(
-    file: &str,
-    input: &str,
-) -> Result<Program, ParseError<Loc, anyhow::Error>> {
-    let mut tokens = Lexer::new(leak_str(file), input);
-    tokens.advance()?;
-    parse_program(&mut tokens)
 }
 
 pub fn parse_script_string(

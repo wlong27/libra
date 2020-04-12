@@ -56,7 +56,6 @@ pub enum Tok {
     BorrowGlobal,
     BorrowGlobalMut,
     Break,
-    Bytearray,
     Continue,
     Copy,
     Else,
@@ -81,7 +80,6 @@ pub enum Tok {
     Loop,
     Main,
     Module,
-    Modules,
     Move,
     MoveFrom,
     MoveToSender,
@@ -94,7 +92,6 @@ pub enum Tok {
     SpecReturn,
     /// Return statement in the Move language
     Return,
-    Script,
     Struct,
     SucceedsIf,
     Synthetic,
@@ -105,7 +102,7 @@ pub enum Tok {
     U64,
     U128,
     Vector,
-    Unrestricted,
+    Copyable,
     While,
     LBrace,
     Pipe,
@@ -120,10 +117,10 @@ impl Tok {
     /// Return true if the given token is the beginning of a specification directive for the Move
     /// prover
     pub fn is_spec_directive(self) -> bool {
-        match self {
-            Tok::Ensures | Tok::Requires | Tok::SucceedsIf | Tok::AbortsIf => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            Tok::Ensures | Tok::Requires | Tok::SucceedsIf | Tok::AbortsIf
+        )
     }
 }
 
@@ -255,17 +252,13 @@ impl<'input> Lexer<'input> {
                             "exists" => (Tok::Exists, len + 1),
                             "move_from" => (Tok::MoveFrom, len + 1),
                             "move_to_sender" => (Tok::MoveToSender, len + 1),
+                            "main" => (Tok::Main, len),
                             _ => (Tok::NameBeginTyValue, len + 1),
                         },
                         Some('(') => match name {
                             "assert" => (Tok::Assert, len + 1),
                             "copy" => (Tok::Copy, len + 1),
                             "move" => (Tok::Move, len + 1),
-                            _ => (get_name_token(name), len),
-                        },
-                        Some(':') => match name {
-                            "modules" => (Tok::Modules, len + 1),
-                            "script" => (Tok::Script, len + 1),
                             _ => (get_name_token(name), len),
                         },
                         _ => (get_name_token(name), len),
@@ -429,7 +422,6 @@ fn get_name_token(name: &str) -> Tok {
         "as" => Tok::As,
         "bool" => Tok::Bool,
         "break" => Tok::Break,
-        "bytearray" => Tok::Bytearray,
         "continue" => Tok::Continue,
         "else" => Tok::Else,
         "ensures" => Tok::Ensures,
@@ -463,7 +455,7 @@ fn get_name_token(name: &str) -> Tok {
         "u8" => Tok::U8,
         "u64" => Tok::U64,
         "u128" => Tok::U128,
-        "unrestricted" => Tok::Unrestricted,
+        "copyable" => Tok::Copyable,
         "while" => Tok::While,
         _ => Tok::NameValue,
     }

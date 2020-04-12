@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Module contains RPC method handlers for Full Node JSON-RPC interface
-use crate::views::{
-    AccountStateWithProofView, AccountView, BlockMetadata, EventView, StateProofView,
-    TransactionView,
+use crate::{
+    errors::JsonRpcError,
+    views::{
+        AccountStateWithProofView, AccountView, BlockMetadata, EventView, StateProofView,
+        TransactionView,
+    },
 };
-use anyhow::{ensure, format_err, Result};
+use anyhow::{ensure, format_err, Error, Result};
 use core::future::Future;
 use debug_interface::prelude::*;
 use futures::{channel::oneshot, SinkExt};
@@ -16,18 +19,18 @@ use libra_types::{
     account_address::AccountAddress, account_state::AccountState, event::EventKey,
     mempool_status::MempoolStatusCode, transaction::SignedTransaction,
 };
-use libradb::LibraDBTrait;
 use serde_json::Value;
 use std::{collections::HashMap, convert::TryFrom, pin::Pin, str::FromStr, sync::Arc};
+use storage_interface::DbReader;
 
 #[derive(Clone)]
 pub(crate) struct JsonRpcService {
-    db: Arc<dyn LibraDBTrait>,
+    db: Arc<dyn DbReader>,
     mempool_sender: MempoolClientSender,
 }
 
 impl JsonRpcService {
-    pub fn new(db: Arc<dyn LibraDBTrait>, mempool_sender: MempoolClientSender) -> Self {
+    pub fn new(db: Arc<dyn DbReader>, mempool_sender: MempoolClientSender) -> Self {
         Self { db, mempool_sender }
     }
 }
@@ -51,14 +54,11 @@ async fn submit(mut service: JsonRpcService, params: Vec<Value>) -> Result<()> {
     let (mempool_status, vm_status) = callback.await??;
 
     if let Some(vm_error) = vm_status {
-        Err(format_err!("VM validation error: {:?}", vm_error))
+        Err(Error::new(JsonRpcError::vm_error(vm_error)))
     } else if mempool_status.code == MempoolStatusCode::Accepted {
         Ok(())
     } else {
-        Err(format_err!(
-            "Mempool insertion failed: {:?}",
-            mempool_status
-        ))
+        Err(Error::new(JsonRpcError::mempool_error(mempool_status)?))
     }
 }
 
@@ -118,7 +118,12 @@ async fn get_transactions(
         vec![]
     };
 
-    for (v, tx) in txs.transactions.into_iter().enumerate() {
+    let txs_with_info = txs
+        .transactions
+        .into_iter()
+        .zip(txs.proof.transaction_infos().iter());
+
+    for (v, (tx, info)) in txs_with_info.enumerate() {
         let events = if include_events {
             all_events
                 .get(v)
@@ -135,6 +140,8 @@ async fn get_transactions(
             version: start_version + v as u64,
             transaction: tx.into(),
             events,
+            vm_status: info.major_status(),
+            gas_used: info.gas_used(),
         });
     }
     Ok(result)
@@ -177,6 +184,8 @@ async fn get_account_transaction(
             version: tx_version,
             transaction: tx.transaction.into(),
             events,
+            vm_status: tx.proof.transaction_info().major_status(),
+            gas_used: tx.proof.transaction_info().gas_used(),
         }))
     } else {
         Ok(None)
@@ -190,7 +199,7 @@ async fn get_events(service: JsonRpcService, params: Vec<Value>) -> Result<Vec<E
     let limit: u64 = serde_json::from_value(params[2].clone())?;
 
     let event_key = EventKey::try_from(&hex::decode(raw_event_key)?[..])?;
-    let events_with_proof = service.db.get_events(&event_key, start, limit)?;
+    let events_with_proof = service.db.get_events(&event_key, start, true, limit)?;
 
     let mut events = vec![];
     for (version, event) in events_with_proof {

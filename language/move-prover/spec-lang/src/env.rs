@@ -17,23 +17,23 @@ use codespan_reporting::{
 use itertools::Itertools;
 use num::{BigUint, Num};
 
-use bytecode_source_map::source_map::ModuleSourceMap;
+use bytecode_source_map::source_map::SourceMap;
 use libra_types::language_storage;
 use vm::{
     access::ModuleAccess,
     file_format::{
-        AddressPoolIndex, FieldDefinitionIndex, FunctionDefinitionIndex, FunctionHandleIndex, Kind,
-        LocalsSignatureIndex, SignatureToken, StructDefinitionIndex, StructFieldInformation,
+        AddressPoolIndex, CodeOffset, FunctionDefinitionIndex, FunctionHandleIndex, Kind,
+        SignatureIndex, SignatureToken, StructDefinitionIndex, StructFieldInformation,
         StructHandleIndex,
     },
     views::{
-        FieldDefinitionView, FunctionDefinitionView, FunctionHandleView, SignatureTokenView,
-        StructDefinitionView, StructHandleView, ViewInternals,
+        FunctionDefinitionView, FunctionHandleView, SignatureTokenView, StructDefinitionView,
+        StructHandleView,
     },
 };
 
 use crate::{
-    ast::{Condition, Invariant, InvariantKind, ModuleName, SpecFunDecl, SpecVarDecl},
+    ast::{Condition, FunSpec, Invariant, InvariantKind, ModuleName, SpecFunDecl, SpecVarDecl},
     symbol::{Symbol, SymbolPool},
     ty::{PrimitiveType, Type},
 };
@@ -380,11 +380,12 @@ impl GlobalEnv {
         &mut self,
         loc: Loc,
         module: CompiledModule,
-        source_map: ModuleSourceMap<MoveIrLoc>,
+        source_map: SourceMap<MoveIrLoc>,
         struct_data: BTreeMap<StructId, StructData>,
         function_data: BTreeMap<FunId, FunctionData>,
         spec_vars: Vec<SpecVarDecl>,
         spec_funs: Vec<SpecFunDecl>,
+        module_invariants: Vec<Invariant>,
         loc_map: BTreeMap<NodeId, Loc>,
         type_map: BTreeMap<NodeId, Type>,
         instantiation_map: BTreeMap<NodeId, Vec<Type>>,
@@ -423,6 +424,7 @@ impl GlobalEnv {
             function_idx_to_id,
             spec_vars,
             spec_funs,
+            module_invariants,
             source_map,
             loc,
             loc_map,
@@ -441,7 +443,7 @@ impl GlobalEnv {
         loc: Loc,
         arg_names: Vec<Symbol>,
         type_arg_names: Vec<Symbol>,
-        spec: Vec<Condition>,
+        spec: FunSpec,
     ) -> FunctionData {
         let handle_idx = module.function_def_at(def_idx).function;
         FunctionData {
@@ -466,28 +468,27 @@ impl GlobalEnv {
         invariants: Vec<Invariant>,
     ) -> StructData {
         let handle_idx = module.struct_def_at(def_idx).struct_handle;
-        let field_data = if let StructFieldInformation::Declared {
-            field_count,
-            fields,
-        } = module.struct_def_at(def_idx).field_information
+        let field_data = if let StructFieldInformation::Declared(fields) =
+            &module.struct_def_at(def_idx).field_information
         {
             let mut map = BTreeMap::new();
-            for idx in fields.0..fields.0 + field_count {
-                let def_idx = FieldDefinitionIndex(idx);
-                let def = module.field_def_at(def_idx);
+            for (offset, field) in fields.iter().enumerate() {
                 let name = self
                     .symbol_pool
-                    .make(module.identifier_at(def.name).as_str());
-                map.insert(FieldId(name), FieldData { name, def_idx });
+                    .make(module.identifier_at(field.name).as_str());
+                map.insert(
+                    FieldId(name),
+                    FieldData {
+                        name,
+                        def_idx,
+                        offset,
+                    },
+                );
             }
             map
         } else {
             BTreeMap::new()
         };
-        let field_def_idx_to_id: BTreeMap<FieldDefinitionIndex, FieldId> = field_data
-            .iter()
-            .map(|(id, data)| (data.def_idx, *id))
-            .collect();
         let mut data_invariants = vec![];
         let mut update_invariants = vec![];
         let mut pack_invariants = vec![];
@@ -499,6 +500,7 @@ impl GlobalEnv {
                 InvariantKind::Update => update_invariants.push(inv),
                 InvariantKind::Pack => pack_invariants.push(inv),
                 InvariantKind::Unpack => unpack_invariants.push(inv),
+                _ => panic!("unexpected invariant kind"),
             }
         }
         StructData {
@@ -507,7 +509,6 @@ impl GlobalEnv {
             def_idx,
             handle_idx,
             field_data,
-            field_def_idx_to_id,
             data_invariants,
             update_invariants,
             pack_invariants,
@@ -677,8 +678,11 @@ pub struct ModuleData {
     /// Specification functions, in SpecFunId order.
     pub spec_funs: BTreeMap<SpecFunId, SpecFunDecl>,
 
+    /// Module level invariants.
+    pub module_invariants: Vec<Invariant>,
+
     /// Module source location information.
-    pub source_map: ModuleSourceMap<MoveIrLoc>,
+    pub source_map: SourceMap<MoveIrLoc>,
 
     /// The location of this module.
     pub loc: Loc,
@@ -835,18 +839,6 @@ impl<'env> ModuleEnv<'env> {
         self.data.struct_data.len()
     }
 
-    /// Gets the struct declaring a field specified by FieldDefinitionIndex,
-    /// as it is globally unique for this module.
-    pub fn get_struct_of_field(&self, idx: &FieldDefinitionIndex) -> StructEnv<'_> {
-        let field_view =
-            FieldDefinitionView::new(&self.data.module, self.data.module.field_def_at(*idx));
-        let struct_name = self
-            .env
-            .symbol_pool
-            .make(field_view.member_of().name().as_str());
-        self.find_struct(struct_name).expect("struct undefined")
-    }
-
     /// Returns iterator over structs in this module.
     pub fn get_structs(&'env self) -> impl Iterator<Item = StructEnv<'env>> {
         self.clone().into_structs()
@@ -870,7 +862,6 @@ impl<'env> ModuleEnv<'env> {
             SignatureToken::U8 => Type::Primitive(PrimitiveType::U8),
             SignatureToken::U64 => Type::Primitive(PrimitiveType::U64),
             SignatureToken::U128 => Type::Primitive(PrimitiveType::U128),
-            SignatureToken::ByteArray => Type::Primitive(PrimitiveType::ByteArray),
             SignatureToken::Address => Type::Primitive(PrimitiveType::Address),
             SignatureToken::Reference(t) => {
                 Type::Reference(false, Box::new(self.globalize_signature(&*t)))
@@ -880,7 +871,21 @@ impl<'env> ModuleEnv<'env> {
             }
             SignatureToken::TypeParameter(index) => Type::TypeParameter(*index),
             SignatureToken::Vector(bt) => Type::Vector(Box::new(self.globalize_signature(&*bt))),
-            SignatureToken::Struct(handle_idx, args) => {
+            SignatureToken::Struct(handle_idx) => {
+                let struct_view = StructHandleView::new(
+                    &self.data.module,
+                    self.data.module.struct_handle_at(*handle_idx),
+                );
+                let declaring_module_env = self
+                    .env
+                    .find_module(&self.env.to_module_name(&struct_view.module_id()))
+                    .expect("undefined module");
+                let struct_env = declaring_module_env
+                    .find_struct(self.env.symbol_pool.make(struct_view.name().as_str()))
+                    .expect("undefined struct");
+                Type::Struct(declaring_module_env.data.id, struct_env.get_id(), vec![])
+            }
+            SignatureToken::StructInstantiation(handle_idx, args) => {
                 let struct_view = StructHandleView::new(
                     &self.data.module,
                     self.data.module.struct_handle_at(*handle_idx),
@@ -909,9 +914,14 @@ impl<'env> ModuleEnv<'env> {
     }
 
     /// Gets a list of type actuals associated with the index in the bytecode.
-    pub fn get_type_actuals(&self, idx: LocalsSignatureIndex) -> Vec<Type> {
-        let actuals = &self.data.module.locals_signature_at(idx).0;
-        self.globalize_signatures(actuals)
+    pub fn get_type_actuals(&self, idx: Option<SignatureIndex>) -> Vec<Type> {
+        match idx {
+            Some(idx) => {
+                let actuals = &self.data.module.signature_at(idx).0;
+                self.globalize_signatures(actuals)
+            }
+            None => vec![],
+        }
     }
 
     /// Converts an address pool index for this module into a number representing the address.
@@ -938,6 +948,11 @@ impl<'env> ModuleEnv<'env> {
     /// Gets spec fun by id.
     pub fn get_spec_fun(&self, id: SpecFunId) -> &SpecFunDecl {
         self.data.spec_funs.get(&id).expect("spec fun id defined")
+    }
+
+    /// Gets module invariants.
+    pub fn get_module_invariants(&self) -> &[Invariant] {
+        &self.data.module_invariants
     }
 
     /// Get all spec fun overloads with the given name.
@@ -998,9 +1013,6 @@ pub struct StructData {
 
     /// Field definitions.
     field_data: BTreeMap<FieldId, FieldData>,
-
-    /// Map from definition index to id.
-    field_def_idx_to_id: BTreeMap<FieldDefinitionIndex, FieldId>,
 
     // Invariants
     data_invariants: Vec<Invariant>,
@@ -1067,12 +1079,16 @@ impl<'env> StructEnv<'env> {
         handle.is_nominal_resource
     }
 
-    /// Get an iterator for the fields.
+    /// Get an iterator for the fields, ordered by offset.
     pub fn get_fields(&'env self) -> impl Iterator<Item = FieldEnv<'env>> {
-        self.data.field_data.iter().map(move |(_, data)| FieldEnv {
-            struct_env: self.clone(),
-            data,
-        })
+        self.data
+            .field_data
+            .values()
+            .sorted_by_key(|data| data.offset)
+            .map(move |data| FieldEnv {
+                struct_env: self.clone(),
+                data,
+            })
     }
 
     /// Gets a field by its id.
@@ -1084,17 +1100,6 @@ impl<'env> StructEnv<'env> {
         }
     }
 
-    /// Gets a field by its definition index.
-    pub fn get_field_by_def_idx(&'env self, idx: FieldDefinitionIndex) -> FieldEnv<'env> {
-        self.get_field(
-            *self
-                .data
-                .field_def_idx_to_id
-                .get(&idx)
-                .expect("undefined field definition index"),
-        )
-    }
-
     /// Find a field by its name.
     pub fn find_field(&'env self, name: Symbol) -> Option<FieldEnv<'env>> {
         let id = FieldId(name);
@@ -1104,6 +1109,19 @@ impl<'env> StructEnv<'env> {
         })
     }
 
+    /// Gets a field by its offset.
+    pub fn get_field_by_offset(&'env self, offset: usize) -> FieldEnv<'env> {
+        for data in self.data.field_data.values() {
+            if data.offset == offset {
+                return FieldEnv {
+                    struct_env: self.clone(),
+                    data,
+                };
+            }
+        }
+        unreachable!("invalid field lookup")
+    }
+
     /// Returns the type parameters associated with this struct.
     pub fn get_type_parameters(&self) -> Vec<TypeParameter> {
         // TODO: we currently do not know the original names of those formals, so we generate them.
@@ -1111,7 +1129,7 @@ impl<'env> StructEnv<'env> {
             &self.module_env.data.module,
             self.module_env.data.module.struct_def_at(self.data.def_idx),
         );
-        view.type_formals()
+        view.type_parameters()
             .iter()
             .enumerate()
             .map(|(i, k)| {
@@ -1159,8 +1177,11 @@ pub struct FieldData {
     /// The name of this field.
     name: Symbol,
 
-    /// The definition index of this field in its module.
-    def_idx: FieldDefinitionIndex,
+    /// The struct definition index of this field in its module.
+    def_idx: StructDefinitionIndex,
+
+    /// The offset of this field.
+    offset: usize,
 }
 
 #[derive(Debug)]
@@ -1185,17 +1206,19 @@ impl<'env> FieldEnv<'env> {
 
     /// Gets the type of this field.
     pub fn get_type(&self) -> Type {
-        let view = FieldDefinitionView::new(
-            &self.struct_env.module_env.data.module,
-            self.struct_env
-                .module_env
-                .data
-                .module
-                .field_def_at(self.data.def_idx),
-        );
+        let struct_def = self
+            .struct_env
+            .module_env
+            .data
+            .module
+            .struct_def_at(self.data.def_idx);
+        let field = match &struct_def.field_information {
+            StructFieldInformation::Declared(fields) => &fields[self.data.offset],
+            StructFieldInformation::Native => unreachable!(),
+        };
         self.struct_env
             .module_env
-            .globalize_signature(view.type_signature().token().as_inner())
+            .globalize_signature(&field.signature.0)
     }
 }
 
@@ -1231,7 +1254,7 @@ pub struct FunctionData {
     type_arg_names: Vec<Symbol>,
 
     /// List of specification conditions. Not in bytecode but obtained from AST.
-    spec: Vec<Condition>,
+    spec: FunSpec,
 }
 
 #[derive(Debug, Clone)]
@@ -1290,11 +1313,17 @@ impl<'env> FunctionEnv<'env> {
         view.is_native()
     }
 
+    /// Returns true if this function is public.
+    pub fn is_public(&self) -> bool {
+        let view = self.definition_view();
+        view.is_public()
+    }
+
     /// Returns true if this function mutates any references (i.e. has &mut parameters).
     pub fn is_mutating(&self) -> bool {
         self.get_parameters()
             .iter()
-            .any(|Parameter(_, ty)| ty.is_mutual_reference())
+            .any(|Parameter(_, ty)| ty.is_mutable_reference())
     }
 
     /// Returns the type parameters associated with this function.
@@ -1302,8 +1331,7 @@ impl<'env> FunctionEnv<'env> {
         // TODO: currently the translation scheme isn't working with using real type
         //   parameter names, so use indices instead.
         let view = self.definition_view();
-        view.signature()
-            .type_formals()
+        view.type_parameters()
             .iter()
             .enumerate()
             .map(|(i, k)| {
@@ -1318,8 +1346,7 @@ impl<'env> FunctionEnv<'env> {
     /// Returns the regular parameters associated with this function.
     pub fn get_parameters(&self) -> Vec<Parameter> {
         let view = self.definition_view();
-        view.signature()
-            .arg_tokens()
+        view.arg_tokens()
             .map(|tv: SignatureTokenView<CompiledModule>| {
                 self.module_env.globalize_signature(tv.signature_token())
             })
@@ -1331,8 +1358,7 @@ impl<'env> FunctionEnv<'env> {
     /// Returns return types of this function.
     pub fn get_return_types(&self) -> Vec<Type> {
         let view = self.definition_view();
-        view.signature()
-            .return_tokens()
+        view.return_tokens()
             .map(|tv: SignatureTokenView<CompiledModule>| {
                 self.module_env.globalize_signature(tv.signature_token())
             })
@@ -1342,7 +1368,7 @@ impl<'env> FunctionEnv<'env> {
     /// Returns the number of return values of this function.
     pub fn get_return_count(&self) -> usize {
         let view = self.definition_view();
-        view.signature().return_count()
+        view.return_count()
     }
 
     /// Get the name to be used for a local. If the local is an argument, use that for naming,
@@ -1392,8 +1418,13 @@ impl<'env> FunctionEnv<'env> {
     }
 
     /// Returns specification conditions associated with this function.
-    pub fn get_specification(&'env self) -> &'env [Condition] {
-        &self.data.spec
+    pub fn get_specification_on_decl(&'env self) -> &'env [Condition] {
+        &self.data.spec.on_decl
+    }
+
+    /// Returns specification conditions associated with this function at bytecode offset.
+    pub fn get_specification_on_impl(&'env self, offset: CodeOffset) -> Option<&'env [Condition]> {
+        self.data.spec.on_impl.get(&offset).map(|x| x.as_slice())
     }
 
     fn definition_view(&'env self) -> FunctionDefinitionView<'env, CompiledModule> {

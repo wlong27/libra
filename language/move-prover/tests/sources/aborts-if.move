@@ -1,91 +1,105 @@
-module AbortsIf {
+module TestAbortsIf {
+
+    // -------------------------
+    // No `aborts_if` statements
+    // -------------------------
+
+    // succeeds, because the specification claims no 'aborts_if' condition.
+    fun no_aborts_if(x: u64, y: u64) {
+        abort 1
+    }
+    spec fun no_aborts_if {
+    }
+
+
+    // ----------------------------
+    // Single `aborts_if` statement
+    // ----------------------------
 
     // succeeds. Very basic test.
-    fun abort01(x: u64, y: u64) {
+    fun abort1(x: u64, y: u64) {
         if (!(x > y)) abort 1
     }
-    spec fun abort01 {
+    spec fun abort1 {
         aborts_if x <= y;
     }
 
     // fails, because it does not abort when x <= y.
-    fun abort02(x: u64, y: u64) {
+    fun abort2_incorrect(x: u64, y: u64) {
     }
-    spec fun abort02 {
+    spec fun abort2_incorrect {
         aborts_if x <= y;
     }
 
-    // succeeds, because the specification claims no 'aborts_if' condition.
-    fun abort03(x: u64, y: u64) {
-        abort 1
-    }
-    spec fun abort03 {
-    }
-
     // succeeds.
-    fun abort04(x: u64, y: u64) {
+    fun abort3(x: u64, y: u64) {
         abort 1
     }
-    spec fun abort04 {
+    spec fun abort3 {
         aborts_if true;
     }
 
     // fails, because it does not abort when x <= y.
-    fun abort05(x: u64, y: u64) {
+    fun abort4_incorrect(x: u64, y: u64) {
         if (x > y) abort 1
     }
-    spec fun abort05 {
+    spec fun abort4_incorrect {
         aborts_if x <= y;
     }
 
     // fails, because it also aborts when x == y which condition has not been specified.
-    fun abort06(x: u64, y: u64) {
+    fun abort5_incorrect(x: u64, y: u64) {
         if (x <= y) abort 1
     }
-    spec fun abort06 {
+    spec fun abort5_incorrect {
         aborts_if x < y;
     }
 
     // fails, because it does not abort when x == y.
-    fun abort07(x: u64, y: u64) {
+    fun abort6_incorrect(x: u64, y: u64) {
         if (x < y) abort 1
     }
-    spec fun abort07 {
+    spec fun abort6_incorrect {
         aborts_if x <= y;
     }
 
+
+    // -------------------------------
+    // Multiple `aborts_if` statements
+    // -------------------------------
+
     // succeeds. Multiple 'aborts_if' conditions are 'or'ed.
-    fun abort08(x: u64, y: u64) {
+    fun multi_abort1(x: u64, y: u64) {
         if (x <= y) abort 1
     }
-    spec fun abort08 {
+    spec fun multi_abort1 {
         aborts_if x < y;
         aborts_if x == y;
     }
 
     // fails, because it does not abort when x == y.
-    fun abort09(x: u64, y: u64) {
+    fun multi_abort2_incorrect(x: u64, y: u64) {
         if (x < y) abort 1
     }
-    spec fun abort09 {
+    spec fun multi_abort2_incorrect {
         aborts_if x < y;
         aborts_if x == y;
     }
 
     // fails, because it also abort when x > y which condition has not been specified.
-    fun abort10(x: u64, y: u64) {
+    fun multi_abort3_incorrect(x: u64, y: u64) {
         abort 1
     }
-    spec fun abort10 {
+    spec fun multi_abort3_incorrect {
         aborts_if x < y;
         aborts_if x == y;
     }
 
     // succeeds. Aborts all the time.
-    fun abort11(x: u64, y: u64) {
+    fun multi_abort4(x: u64, y: u64) {
         abort 1
     }
-    spec fun abort11 {
+    spec fun multi_abort4 {
         aborts_if x < y;
         aborts_if x == y;
         aborts_if x > y;

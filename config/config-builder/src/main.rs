@@ -114,9 +114,6 @@ struct ValidatorArgs {
     #[structopt(short = "l", long, parse(from_str = parse_addr))]
     /// Listening address for this node
     listen: Multiaddr,
-    #[structopt(short = "t", long, parse(from_os_str))]
-    /// Path to a template NodeConfig
-    template: Option<PathBuf>,
     #[structopt(flatten)]
     validator_common: ValidatorCommonArgs,
 }
@@ -151,9 +148,15 @@ struct ValidatorCommonArgs {
     /// Specifies the token for secure storages that use credentials
     #[structopt(long)]
     safety_rules_token: Option<String>,
+    /// Specifies a unique namespace for the secure storage
+    #[structopt(long)]
+    safety_rules_namespace: Option<String>,
     #[structopt(short = "s", long)]
     /// Use the provided seed for generating keys for each of the validators
     seed: Option<String>,
+    #[structopt(short = "t", long, parse(from_os_str))]
+    /// Path to a template NodeConfig
+    template: Option<PathBuf>,
 }
 
 fn parse_addr(src: &str) -> Multiaddr {
@@ -243,7 +246,7 @@ fn build_full_node_config_builder(args: &FullNodeArgs) -> FullNodeConfig {
         .full_nodes(args.full_nodes)
         .listen(args.listen.clone())
         .nodes(args.nodes)
-        .template(load_template(args.template.clone()));
+        .template(load_template(args.template.as_ref()));
 
     if let Some(fn_seed) = args.full_node_seed.as_ref() {
         config_builder.full_node_seed(parse_seed(fn_seed));
@@ -266,19 +269,7 @@ fn build_safety_rules(args: SafetyRulesArgs) {
         return;
     }
 
-    let mut config_builder = ValidatorConfig::new();
-    config_builder
-        .index(args.validator_common.index)
-        .nodes(args.validator_common.nodes)
-        .safety_rules_addr(args.validator_common.safety_rules_addr)
-        .safety_rules_backend(args.validator_common.safety_rules_backend)
-        .safety_rules_host(args.validator_common.safety_rules_host)
-        .safety_rules_token(args.validator_common.safety_rules_token);
-
-    if let Some(seed) = args.validator_common.seed.as_ref() {
-        config_builder.seed(parse_seed(seed));
-    }
-
+    let config_builder = safety_rules_common(&args.validator_common);
     let mut node_config = config_builder.build().expect("ConfigBuilder failed");
     node_config.set_data_dir(args.validator_common.data_dir);
     save_config(node_config, &args.validator_common.output_dir);
@@ -290,19 +281,14 @@ fn build_validator(args: ValidatorArgs) {
         return;
     }
 
-    let mut config_builder = ValidatorConfig::new();
+    let mut config_builder = safety_rules_common(&args.validator_common);
     config_builder
         .advertised(args.advertised)
         .bootstrap(args.bootstrap)
         .index(args.validator_common.index)
         .listen(args.listen)
         .nodes(args.validator_common.nodes)
-        .nodes_in_genesis(args.validator_common.nodes_in_genesis)
-        .safety_rules_addr(args.validator_common.safety_rules_addr)
-        .safety_rules_backend(args.validator_common.safety_rules_backend)
-        .safety_rules_host(args.validator_common.safety_rules_host)
-        .safety_rules_token(args.validator_common.safety_rules_token)
-        .template(load_template(args.template));
+        .nodes_in_genesis(args.validator_common.nodes_in_genesis);
 
     if let Some(seed) = args.validator_common.seed.as_ref() {
         config_builder.seed(parse_seed(seed));
@@ -313,11 +299,31 @@ fn build_validator(args: ValidatorArgs) {
     save_config(node_config, &args.validator_common.output_dir);
 }
 
+fn safety_rules_common(args: &ValidatorCommonArgs) -> ValidatorConfig {
+    let mut config_builder = ValidatorConfig::new();
+
+    config_builder
+        .index(args.index)
+        .nodes(args.nodes)
+        .safety_rules_addr(args.safety_rules_addr.clone())
+        .safety_rules_backend(args.safety_rules_backend.clone())
+        .safety_rules_host(args.safety_rules_host.clone())
+        .safety_rules_namespace(args.safety_rules_namespace.clone())
+        .safety_rules_token(args.safety_rules_token.clone())
+        .template(load_template(args.template.as_ref()));
+
+    if let Some(seed) = args.seed.as_ref() {
+        config_builder.seed(parse_seed(seed));
+    }
+
+    config_builder
+}
+
 fn node_config_exists(output_dir: &PathBuf) -> bool {
     output_dir.join(NODE_CONFIG).exists()
 }
 
-fn load_template(template: Option<PathBuf>) -> NodeConfig {
+fn load_template(template: Option<&PathBuf>) -> NodeConfig {
     if let Some(template_path) = template {
         NodeConfig::load(template_path).expect("Unable to load template")
     } else {

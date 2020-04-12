@@ -18,18 +18,18 @@ use libra_logger::prelude::*;
 use libra_temppath::TempPath;
 use libra_types::{
     access_path::AccessPath,
-    account_address::{
-        AccountAddress, AuthenticationKey, ADDRESS_LENGTH, AUTHENTICATION_KEY_LENGTH,
-    },
+    account_address::AccountAddress,
     account_config::{
-        association_address, ACCOUNT_RECEIVED_EVENT_PATH, ACCOUNT_SENT_EVENT_PATH,
+        association_address, lbr_type_tag, ACCOUNT_RECEIVED_EVENT_PATH, ACCOUNT_SENT_EVENT_PATH,
         CORE_CODE_ADDRESS,
     },
     account_state::AccountState,
     ledger_info::LedgerInfoWithSignatures,
+    on_chain_config::VMPublishingOption,
     transaction::{
+        authenticator::AuthenticationKey,
         helpers::{create_unsigned_txn, create_user_txn, TransactionSigner},
-        parse_as_transaction_argument, RawTransaction, Script, SignedTransaction,
+        parse_as_transaction_argument, Module, RawTransaction, Script, SignedTransaction,
         TransactionArgument, TransactionPayload, Version,
     },
     waypoint::Waypoint,
@@ -40,6 +40,7 @@ use num_traits::{
     identities::Zero,
 };
 use parity_multiaddr::Multiaddr;
+use reqwest::Url;
 use rust_decimal::Decimal;
 use serde_json;
 use std::{
@@ -52,6 +53,7 @@ use std::{
     str::{self, FromStr},
     thread, time,
 };
+use stdlib::transaction_scripts::StdlibScript;
 use transaction_builder::encode_register_validator_script;
 
 const CLIENT_WALLET_MNEMONIC_FILE: &str = "client.mnemonic";
@@ -116,15 +118,16 @@ pub struct ClientProxy {
 impl ClientProxy {
     /// Construct a new TestClient.
     pub fn new(
-        host: &str,
-        port: u16,
+        url: &str,
         faucet_account_file: &str,
         sync_on_wallet_recovery: bool,
         faucet_server: Option<String>,
         mnemonic_file: Option<String>,
         waypoint: Option<Waypoint>,
     ) -> Result<Self> {
-        let mut client = LibraClient::new(host, port, waypoint)?;
+        // fail fast if url is not valid
+        let url = Url::parse(url)?;
+        let mut client = LibraClient::new(url.clone(), waypoint)?;
 
         let accounts = vec![];
 
@@ -149,7 +152,10 @@ impl ClientProxy {
 
         let faucet_server = match faucet_server {
             Some(server) => server,
-            None => host.replace("ac", "faucet"),
+            None => url
+                .host_str()
+                .ok_or_else(|| format_err!("Missing host in URL"))?
+                .replace("client", "faucet"),
         };
 
         let address_to_ref_id = accounts
@@ -321,7 +327,49 @@ impl ClientProxy {
                 ),
                 is_blocking,
             ),
-            None => self.mint_coins_with_faucet_service(&receiver, num_coins, is_blocking),
+            None => self.mint_coins_with_faucet_service(receiver_auth_key, num_coins, is_blocking),
+        }
+    }
+
+    /// Allow executing arbitrary script in the network.
+    pub fn enable_custom_script(
+        &mut self,
+        space_delim_strings: &[&str],
+        is_blocking: bool,
+    ) -> Result<()> {
+        ensure!(
+            space_delim_strings.len() == 1,
+            "Invalid number of arguments for setting publishing option"
+        );
+        match self.faucet_account {
+            Some(_) => self.association_transaction_with_local_faucet_account(
+                transaction_builder::encode_publishing_option_script(
+                    VMPublishingOption::CustomScripts,
+                ),
+                is_blocking,
+            ),
+            None => unimplemented!(),
+        }
+    }
+
+    /// Only allow executing predefined script in the move standard library in the network.
+    pub fn disable_custom_script(
+        &mut self,
+        space_delim_strings: &[&str],
+        is_blocking: bool,
+    ) -> Result<()> {
+        ensure!(
+            space_delim_strings.len() == 1,
+            "Invalid number of arguments for setting publishing option"
+        );
+        match self.faucet_account {
+            Some(_) => self.association_transaction_with_local_faucet_account(
+                transaction_builder::encode_publishing_option_script(VMPublishingOption::Locked(
+                    StdlibScript::whitelist(),
+                )),
+                is_blocking,
+            ),
+            None => unimplemented!(),
         }
     }
 
@@ -462,6 +510,7 @@ impl ClientProxy {
                 format_err!("Unable to find sender account: {}", sender_account_ref_id)
             })?;
             let program = transaction_builder::encode_transfer_script(
+                lbr_type_tag(),
                 &receiver_address,
                 receiver_auth_key_prefix,
                 num_coins,
@@ -505,6 +554,7 @@ impl ClientProxy {
         max_gas_amount: Option<u64>,
     ) -> Result<RawTransaction> {
         let program = transaction_builder::encode_transfer_script(
+            lbr_type_tag(),
             &receiver_address,
             receiver_auth_key_prefix,
             num_coins,
@@ -516,6 +566,7 @@ impl ClientProxy {
             sender_sequence_number,
             max_gas_amount.unwrap_or(MAX_GAS_AMOUNT),
             gas_unit_price.unwrap_or(GAS_UNIT_PRICE),
+            lbr_type_tag(),
             TX_EXPIRATION,
         ))
     }
@@ -704,21 +755,24 @@ impl ClientProxy {
 
     /// Publish move module
     pub fn publish_module(&mut self, space_delim_strings: &[&str]) -> Result<()> {
-        let module = serde_json::from_slice(&fs::read(space_delim_strings[2])?)?;
-        self.submit_program(space_delim_strings, TransactionPayload::Module(module))
+        let module_bytes = fs::read(space_delim_strings[2])?;
+        self.submit_program(
+            space_delim_strings,
+            TransactionPayload::Module(Module::new(module_bytes)),
+        )
     }
 
     /// Execute custom script
     pub fn execute_script(&mut self, space_delim_strings: &[&str]) -> Result<()> {
-        let script: Script = serde_json::from_slice(&fs::read(space_delim_strings[2])?)?;
-        let (script_bytes, _) = script.into_inner();
+        let script_bytes = fs::read(space_delim_strings[2])?;
         let arguments: Vec<_> = space_delim_strings[3..]
             .iter()
             .filter_map(|arg| parse_as_transaction_argument_for_client(arg).ok())
             .collect();
+        // TODO: support type arguments in the client.
         self.submit_program(
             space_delim_strings,
-            TransactionPayload::Script(Script::new(script_bytes, arguments)),
+            TransactionPayload::Script(Script::new(script_bytes, vec![], arguments)),
         )
     }
 
@@ -850,7 +904,7 @@ impl ClientProxy {
         space_delim_strings: &[&str],
     ) -> Result<(Vec<EventView>, AccountView)> {
         ensure!(
-            space_delim_strings.len() == 6,
+            space_delim_strings.len() == 5,
             "Invalid number of arguments to get events by access path"
         );
         let (account, _) = self.get_account_address_from_parameter(space_delim_strings[1])?;
@@ -871,11 +925,11 @@ impl ClientProxy {
                 error,
             )
         })?;
-        let limit = space_delim_strings[5].parse::<u64>().map_err(|error| {
+        let limit = space_delim_strings[4].parse::<u64>().map_err(|error| {
             format_parse_data_error(
                 "start_seq_number",
                 InputType::UnsignedInt,
-                space_delim_strings[3],
+                space_delim_strings[4],
                 error,
             )
         })?;
@@ -1056,7 +1110,7 @@ impl ClientProxy {
     fn address_from_strings(data: &str) -> Result<AccountAddress> {
         let account_vec: Vec<u8> = hex::decode(data.parse::<String>()?)?;
         ensure!(
-            account_vec.len() == ADDRESS_LENGTH,
+            account_vec.len() == AccountAddress::LENGTH,
             "The address {:?} is of invalid length. Addresses must be 16-bytes long"
         );
         let account = AccountAddress::try_from(&account_vec[..]).map_err(|error| {
@@ -1072,7 +1126,7 @@ impl ClientProxy {
     fn authentication_key_from_string(data: &str) -> Result<AuthenticationKey> {
         let bytes_vec: Vec<u8> = hex::decode(data.parse::<String>()?)?;
         ensure!(
-            bytes_vec.len() == AUTHENTICATION_KEY_LENGTH,
+            bytes_vec.len() == AuthenticationKey::LENGTH,
             "The authentication key string {:?} is of invalid length. Authentication keys must be 32-bytes long"
         );
 
@@ -1109,17 +1163,17 @@ impl ClientProxy {
 
     fn mint_coins_with_faucet_service(
         &mut self,
-        receiver: &AccountAddress,
+        receiver: AuthenticationKey,
         num_coins: u64,
         is_blocking: bool,
     ) -> Result<()> {
         let client = reqwest::blocking::ClientBuilder::new().build()?;
 
-        let url = reqwest::Url::parse_with_params(
+        let url = Url::parse_with_params(
             format!("http://{}", self.faucet_server).as_str(),
             &[
                 ("amount", num_coins.to_string().as_str()),
-                ("address", format!("{:?}", receiver).as_str()),
+                ("auth_key", &hex::encode(receiver)),
             ],
         )?;
 
@@ -1184,6 +1238,7 @@ impl ClientProxy {
             sender_account.sequence_number,
             max_gas_amount.unwrap_or(MAX_GAS_AMOUNT),
             gas_unit_price.unwrap_or(GAS_UNIT_PRICE),
+            lbr_type_tag(),
             TX_EXPIRATION,
         )
     }
@@ -1261,11 +1316,10 @@ mod tests {
         let file = TempPath::new();
         let mnemonic_path = file.path().to_str().unwrap().to_string();
 
-        // We don't need to specify host/port since the client won't be used to connect, only to
+        // Note: `client_proxy` won't actually connect to URL - it will be used only to
         // generate random accounts
         let mut client_proxy = ClientProxy::new(
-            "", /* host */
-            0,  /* JSON RPC port*/
+            "http://localhost:8080",
             &"",
             false,
             None,
